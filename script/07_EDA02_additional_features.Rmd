@@ -1,0 +1,968 @@
+---
+title: "07_EDA02_additional_features"
+author: "Yiwen Xiang"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    number_sections: true
+---
+
+# 1. Setup
+
+```{r, include=FALSE}
+source(here::here("script", "00_packages.R"))
+source(here::here("script", "02_functions.R"))
+
+w11_datasets <- readRDS(file.path(processed_path, "01_wave11_datasets.rds"))
+data11_main <- w11_datasets$w11_main
+data11_ifs <- w11_datasets$w11_ifs
+data11_financial <- w11_datasets$w11_financial
+data11_nurse <- w11_datasets$w11_nurse
+var_w11_all_labeled <- readRDS(file.path(processed_path, "03var_w11_all_labeled.rds"))
+```
+
+```{r}
+data11_analysis_outcome_valid <- readRDS(
+  file.path(processed_path, "06_wave11_outcome.rds")
+)
+
+head(data11_analysis_outcome_valid)
+```
+
+```{r}
+dim(data11_analysis_outcome_valid)
+```
+
+```{r}
+# Search across all available Wave 11 tables
+candidate_tables <- unique(var_w11_all_labeled$table)
+
+candidate_tables
+```
+
+# 2. Check candidate missingness after searching
+```{r}
+check_candidate_missingness <- function(search_result, analysis_sample) {
+  search_result %>%
+    dplyr::filter(table %in% names(w11_datasets)) %>%
+    dplyr::distinct(table, variable, .keep_all = TRUE) %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      n_analysis = nrow(analysis_sample),
+      n_missing_analysis = {
+        df <- w11_datasets[[table]]
+        
+        if (!variable %in% names(df)) {
+          NA_integer_
+        } else {
+          temp <- analysis_sample %>%
+            dplyr::select(idauniq) %>%
+            dplyr::left_join(
+              df %>%
+                dplyr::select(
+                  idauniq,
+                  value = dplyr::all_of(variable)
+                ),
+              by = "idauniq"
+            )
+          
+          x <- temp$value
+          
+          # ELSA negative values are treated as special missing codes.
+          if (is.numeric(x) | is.integer(x)) {
+            sum(is.na(x) | x < 0)
+          } else {
+            sum(is.na(x))
+          }
+        }
+      },
+      missing_pct_analysis = round(
+        n_missing_analysis / n_analysis * 100,
+        2
+      )
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(missing_pct_analysis, table, variable)
+}
+```
+
+# 3. Subjective social status
+```{r}
+subjective_social_status_search <- search_vars(
+  keywords = c(
+    "subjective social status",
+    "social status",
+    "social ladder",
+    "ladder",
+    "social standing",
+    "social position",
+    "where would you place yourself",
+    "best off",
+    "worst off",
+    "sclddr"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% candidate_tables)
+
+subjective_social_status_search_checked <- check_candidate_missingness(
+  subjective_social_status_search,
+  data11_analysis_outcome_valid
+)
+
+subjective_social_status_search_checked %>%
+  select(table, variable, label, type, n_missing_analysis, missing_pct_analysis) %>%
+  head(30)
+```
+
+
+# 4. Any psychiatric problem
+Psychiatric problem fields are searched before constructing `any_psychiatric_problem`.
+```{r}
+psychiatric_problem_search <- search_vars(
+  keywords = c(
+    "psychiatric problem",
+    "psychiatric",
+    "mental problem",
+    "mental health problem",
+    "emotional problem",
+    "emotional problems",
+    "hallucinations",
+    "hallucination",
+    "anxiety",
+    "depression",
+    "depressed",
+    "schizophrenia",
+    "psychosis",
+    "psychotic",
+    "mood swings",
+    "manic depression",
+    "bipolar",
+    "nervous breakdown",
+    "other psychiatric"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% candidate_tables)
+
+psychiatric_problem_search_checked <- check_candidate_missingness(
+  psychiatric_problem_search,
+  data11_analysis_outcome_valid
+)
+
+psychiatric_problem_search_checked %>%
+  select(table, variable, label, type, n_missing_analysis, missing_pct_analysis) %>%
+  head(80)
+```
+
+# 5. Hypertension
+```{r}
+hypertension_search <- search_vars(
+  keywords = c(
+    "hypertension",
+    "high blood pressure",
+    "blood pressure",
+    "raised blood pressure",
+    "doctor diagnosed high blood pressure",
+    "ever had high blood pressure",
+    "has high blood pressure",
+    "bp",
+    "hibpe",
+    "hehibp",
+    "hibp",
+    "hypert"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% candidate_tables)
+
+hypertension_search_checked <- check_candidate_missingness(
+  hypertension_search,
+  data11_analysis_outcome_valid
+)
+
+hypertension_search_checked %>%
+  select(table, variable, label, type, n_missing_analysis, missing_pct_analysis) %>%
+  head(50)
+```
+
+# 6. Falls / fear of falling
+```{r}
+falls_fear_search <- search_vars(
+  keywords = c(
+    "fall",
+    "falls",
+    "fallen",
+    "falling",
+    "fear of falling",
+    "afraid of falling",
+    "worried about falling",
+    "worry about falling",
+    "concerned about falling",
+    "unsteady",
+    "balance",
+    "trip",
+    "slip",
+    "fracture",
+    "hip fracture"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% candidate_tables)
+
+falls_fear_search_checked <- check_candidate_missingness(
+  falls_fear_search,
+  data11_analysis_outcome_valid
+)
+
+falls_fear_search_checked %>%
+  select(table, variable, label, type, n_missing_analysis, missing_pct_analysis) %>%
+  head(80)
+```
+
+# 7. Volunteering participation
+```{r}
+volunteering_search <- search_vars(
+  keywords = c(
+    "volunteer",
+    "volunteering",
+    "voluntary",
+    "voluntary work",
+    "voluntary organisation",
+    "voluntary organization",
+    "charity",
+    "charitable",
+    "helping others",
+    "unpaid work",
+    "community work",
+    "community group",
+    "civic participation",
+    "social participation"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% candidate_tables)
+
+volunteering_search_checked <- check_candidate_missingness(
+  volunteering_search,
+  data11_analysis_outcome_valid
+)
+
+volunteering_search_checked %>%
+  select(table, variable, label, type, n_missing_analysis, missing_pct_analysis) %>%
+  head(80)
+```
+
+# 8. Memory score / cognition
+```{r}
+memory_score_search <- search_vars(
+  keywords = c(
+    "memory",
+    "memory score",
+    "immediate recall",
+    "delayed recall",
+    "word recall",
+    "recall",
+    "orientation",
+    "orientation score",
+    "cognitive",
+    "cognition",
+    "cognitive function",
+    "mental status",
+    "date naming",
+    "day",
+    "month",
+    "year",
+    "serial",
+    "numeracy",
+    "animal naming",
+    "verbal fluency"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% candidate_tables)
+
+memory_score_search
+```
+
+```{r}
+id_variables <- c(
+  "idauniq",
+  "idahhw11",
+  "idahh",
+  "perid",
+  "hhid",
+  "pid",
+  "serial",
+  "wave"
+)
+
+memory_score_search_clean <- memory_score_search %>%
+  filter(!variable %in% id_variables)
+
+memory_score_search_checked <- check_candidate_missingness(
+  memory_score_search_clean,
+  data11_analysis_outcome_valid
+)
+
+memory_score_search_checked %>%
+  select(
+    table,
+    variable,
+    label,
+    type,
+    n_missing_analysis,
+    missing_pct_analysis
+  ) %>%
+  head(100)
+```
+
+# 9. Receiving care / receiving help
+```{r}
+receiving_care_help_search <- search_vars(
+  keywords = c(
+    "receive care",
+    "receiving care",
+    "received care",
+    "get care",
+    "getting care",
+    "got care",
+    "receive help",
+    "receiving help",
+    "received help",
+    "get help",
+    "getting help",
+    "got help",
+    "help received",
+    "help with activities",
+    "help with daily activities",
+    "help with personal care",
+    "personal care",
+    "home care",
+    "social care",
+    "care package",
+    "care services",
+    "social services",
+    "formal care",
+    "informal care",
+    "paid care",
+    "paid carer",
+    "paid helper",
+    "carer",
+    "caregiver",
+    "helper",
+    "home help",
+    "meals on wheels",
+    "nursing care",
+    "residential care",
+    "sheltered housing",
+    "support worker",
+    "received assistance",
+    "assistance",
+    "help from"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% candidate_tables)
+
+receiving_care_help_search_checked <- check_candidate_missingness(
+  receiving_care_help_search,
+  data11_analysis_outcome_valid
+)
+
+receiving_care_help_search_checked %>%
+  select(table, variable, label, type, n_missing_analysis, missing_pct_analysis) %>%
+  head(100)
+```
+
+# 10. Combine search results
+```{r}
+additional_candidate_search_results <- bind_rows(
+  subjective_social_status_search_checked %>%
+    mutate(search_topic = "subjective_social_status"),
+  
+  psychiatric_problem_search_checked %>%
+    mutate(search_topic = "psychiatric_problem"),
+  
+  hypertension_search_checked %>%
+    mutate(search_topic = "hypertension"),
+  
+  falls_fear_search_checked %>%
+    mutate(search_topic = "falls_fear_of_falling"),
+  
+  volunteering_search_checked %>%
+    mutate(search_topic = "volunteering"),
+  
+  memory_score_search_checked %>%
+    mutate(search_topic = "memory_cognition"),
+  
+  receiving_care_help_search_checked %>%
+    mutate(search_topic = "receiving_care_help")
+) %>%
+  select(
+    search_topic,
+    table,
+    variable,
+    label,
+    type,
+    n_analysis,
+    n_missing_analysis,
+    missing_pct_analysis,
+    everything()
+  ) %>%
+  distinct(search_topic, table, variable, .keep_all = TRUE) %>%
+  arrange(search_topic, missing_pct_analysis, table, variable)
+
+additional_candidate_search_results
+```
+
+Candidate fields with missingness not exceeding 20% were retained for manual review:
+```{r}
+additional_candidate_under20 <- additional_candidate_search_results %>%
+  filter(
+    !is.na(missing_pct_analysis),
+    missing_pct_analysis <= 20
+  ) %>%
+  arrange(search_topic, missing_pct_analysis)
+
+additional_candidate_under20
+```
+
+# 11. Export search results
+```{r}
+export_xlsx(
+  additional_candidate_under20,
+  "additional_candidate_under20.xlsx",
+  output_path
+)
+```
+
+# 12. Construct additional candidate features
+
+For concepts that overlap with base features, the table below documents whether the additional candidate uses alternative or expanded source columns.
+
+```{r}
+additional_feature_source_review <- tibble::tribble(
+  ~concept, ~base_feature, ~base_source_columns, ~additional_feature, ~additional_source_columns, ~note,
+  "Falls", "fall_injury_status", "hefla, heflc", "fall_status", "hefla, heflc, hefrac", "The additional version uses an expanded fall-related source set, including hip fracture information.",
+  "Hypertension", "hypertension", "hediacbp, hediiam1, hehavebp", "hypertension_status", "hediacbp, hediiam1, hediia1, hehavebp", "The additional version uses an expanded diagnosis source set and a more explicit hypertension status definition.",
+  "Memory", "memory_score", "memtotb", "objective_memory_score; self_rated_memory; memory_change", "cflisen, cflisd, cfmetm, cfmetmt", "The additional memory features use different cognitive and self-rated memory fields.",
+  "Care/help", "receiving_help_count", "catno", "any_received_care_help", "cahsmpc and cahn*/cahs*/caany care-help indicators", "The additional version uses detailed care/help source indicators instead of only the count field."
+)
+
+additional_feature_source_review
+```
+
+An ID-only table was created first so that each newly constructed additional feature could be joined back by respondent ID.
+```{r}
+data11_additional_features <- data11_analysis_outcome_valid %>%
+  select(idauniq)
+
+data11_additional_features
+```
+
+```{r}
+fall_feature <- data11_analysis_outcome_valid %>%
+  select(
+    idauniq,
+    hefla,
+    heflc,
+    hefrac
+  ) %>%
+  mutate(
+    hefla_clean = case_when(
+      is.na(hefla) ~ NA_real_,
+      as.numeric(hefla) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(hefla)
+    ),
+    
+    heflc_clean = case_when(
+      is.na(heflc) ~ NA_real_,
+      as.numeric(heflc) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(heflc)
+    ),
+    
+    hefrac_clean = case_when(
+      is.na(hefrac) ~ NA_real_,
+      as.numeric(hefrac) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(hefrac)
+    ),
+    
+    fall_status = case_when(
+      hefrac_clean == 1 | heflc_clean == 1 ~ "Fall with serious injury or hip fracture",
+      hefla_clean == 1 & heflc_clean == 2 ~ "Fall without serious injury",
+      hefla_clean == 2 ~ "No recent fall",
+      TRUE ~ NA_character_
+    ),
+    
+    fall_status = factor(
+      fall_status,
+      levels = c(
+        "No recent fall",
+        "Fall without serious injury",
+        "Fall with serious injury or hip fracture"
+      ),
+      ordered = TRUE
+    )
+  ) %>%
+  select(
+    idauniq,
+    fall_status
+  )
+
+data11_additional_features <- data11_additional_features %>%
+  select(-any_of("fall_status")) %>%
+  left_join(fall_feature, by = "idauniq")
+
+```
+
+```{r}
+hypertension_feature <- data11_analysis_outcome_valid %>%
+  select(
+    idauniq,
+    hediacbp,
+    hediiam1,
+    hediia1,
+    hehavebp
+  ) %>%
+  mutate(
+    hediacbp_clean = case_when(
+      is.na(hediacbp) ~ NA_real_,
+      as.numeric(hediacbp) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(hediacbp)
+    ),
+    
+    hediiam1_clean = case_when(
+      is.na(hediiam1) ~ NA_real_,
+      as.numeric(hediiam1) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(hediiam1)
+    ),
+    
+    hediia1_clean = case_when(
+      is.na(hediia1) ~ NA_real_,
+      as.numeric(hediia1) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(hediia1)
+    ),
+    
+    hehavebp_clean = case_when(
+      is.na(hehavebp) ~ NA_real_,
+      as.numeric(hehavebp) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(hehavebp)
+    ),
+    
+    new_hypertension_diagnosis = coalesce(
+      hediiam1_clean,
+      hediia1_clean
+    ),
+    
+    hypertension_status = case_when(
+      hediacbp_clean == 1 |
+        new_hypertension_diagnosis == 1 |
+        hehavebp_clean == 1 ~ "Hypertension",
+      
+      hediacbp_clean == 2 &
+        new_hypertension_diagnosis == 2 &
+        (is.na(hehavebp_clean) | hehavebp_clean == 2) ~ "No hypertension",
+      
+      TRUE ~ NA_character_
+    ),
+    
+    hypertension_status = factor(
+      hypertension_status,
+      levels = c(
+        "No hypertension",
+        "Hypertension"
+      )
+    )
+  ) %>%
+  select(
+    idauniq,
+    hypertension_status
+  )
+
+data11_additional_features <- data11_additional_features %>%
+  select(-any_of("hypertension_status")) %>%
+  left_join(hypertension_feature, by = "idauniq")
+
+```
+
+
+
+```{r}
+memory_feature <- data11_analysis_outcome_valid %>%
+  select(
+    idauniq,
+    cflisen,
+    cflisd,
+    cfmetm,
+    cfmetmt
+  ) %>%
+  mutate(
+    cflisen_clean = case_when(
+      is.na(cflisen) ~ NA_real_,
+      as.numeric(cflisen) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(cflisen)
+    ),
+    
+    cflisd_clean = case_when(
+      is.na(cflisd) ~ NA_real_,
+      as.numeric(cflisd) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(cflisd)
+    ),
+    
+    cfmetm_clean = case_when(
+      is.na(cfmetm) ~ NA_real_,
+      as.numeric(cfmetm) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(cfmetm)
+    ),
+    
+    cfmetmt_clean = case_when(
+      is.na(cfmetmt) ~ NA_real_,
+      as.numeric(cfmetmt) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(cfmetmt)
+    ),
+    
+    # Higher values indicate better objective memory performance.
+    objective_memory_score = case_when(
+      !is.na(cflisen_clean) & !is.na(cflisd_clean) ~ 
+        cflisen_clean + cflisd_clean,
+      TRUE ~ NA_real_
+    ),
+    
+    self_rated_memory = case_when(
+      cfmetm_clean == 1 ~ 5,
+      cfmetm_clean == 2 ~ 4,
+      cfmetm_clean == 3 ~ 3,
+      cfmetm_clean == 4 ~ 2,
+      cfmetm_clean == 5 ~ 1,
+      TRUE ~ NA_real_
+    ),
+    
+    memory_change = case_when(
+      cfmetmt_clean == 1 ~ 3,
+      cfmetmt_clean == 2 ~ 2,
+      cfmetmt_clean == 3 ~ 1,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  select(
+    idauniq,
+    objective_memory_score,
+    self_rated_memory,
+    memory_change
+  )
+
+data11_additional_features <- data11_additional_features %>%
+  select(
+    -any_of(c(
+      "objective_memory_score",
+      "self_rated_memory",
+      "memory_change"
+    ))
+  ) %>%
+  left_join(memory_feature, by = "idauniq")
+
+```
+
+
+```{r}
+psychiatric_feature <- data11_analysis_outcome_valid %>%
+  select(
+    idauniq,
+    hedids7
+  ) %>%
+  mutate(
+    hedids7_clean = case_when(
+      is.na(hedids7) ~ NA_real_,
+      as.numeric(hedids7) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(hedids7)
+    ),
+    
+    any_psychiatric_problem = case_when(
+      hedids7_clean == 1 ~ "Psychiatric problem mentioned",
+      hedids7_clean == 0 ~ "No psychiatric problem mentioned",
+      TRUE ~ NA_character_
+    ),
+    
+    any_psychiatric_problem = factor(
+      any_psychiatric_problem,
+      levels = c(
+        "No psychiatric problem mentioned",
+        "Psychiatric problem mentioned"
+      )
+    )
+  ) %>%
+  select(
+    idauniq,
+    any_psychiatric_problem
+  )
+
+data11_additional_features <- data11_additional_features %>%
+  select(-any_of("any_psychiatric_problem")) %>%
+  left_join(psychiatric_feature, by = "idauniq")
+
+```
+
+
+```{r}
+# 0/1 variables: 1 = mentioned.
+mentioned_care_vars <- c(
+  "cahsmpc"
+)
+
+# 1/2 variables: 1 = yes, 2 = no.
+yesno_care_vars <- c(
+  # Informal help sources.
+  "cahnbr",
+  "cahnda",
+  "cahnfr",
+  "cahngc",
+  "cahnhw",
+  "cahnne",
+  "cahnor",
+  "cahnsi",
+  "cahnso",
+  
+  # Formal help sources.
+  "cahncl",
+  "cahnhc",
+  "cahnhm",
+  "cahnnh",
+  "cahnot",
+  "cahnre",
+  "cahnvo",
+  "cahnwa",
+  
+  # Care home and non-family care.
+  "cahsa",
+  "caany"
+)
+
+care_help_feature <- data11_analysis_outcome_valid %>%
+  select(
+    idauniq,
+    any_of(c(mentioned_care_vars, yesno_care_vars))
+  ) %>%
+  mutate(
+    across(
+      any_of(c(mentioned_care_vars, yesno_care_vars)),
+      ~ case_when(
+        is.na(.) ~ NA_real_,
+        as.numeric(.) < 0 ~ NA_real_,
+        TRUE ~ as.numeric(.)
+      ),
+      .names = "{.col}_clean"
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(
+    any_received_care_help = {
+      
+      mentioned_x <- c_across(
+        any_of(paste0(mentioned_care_vars, "_clean"))
+      )
+      
+      yesno_x <- c_across(
+        any_of(paste0(yesno_care_vars, "_clean"))
+      )
+      
+      all_x <- c(mentioned_x, yesno_x)
+      
+      case_when(
+        any(mentioned_x == 1, na.rm = TRUE) |
+          any(yesno_x == 1, na.rm = TRUE) ~ "Received care/help",
+        
+        all(mentioned_x %in% c(0, NA), na.rm = FALSE) &
+          all(yesno_x %in% c(2, NA), na.rm = FALSE) &
+          any(!is.na(all_x)) ~ "No care/help received",
+        
+        TRUE ~ NA_character_
+      )
+    },
+    
+    any_received_care_help = factor(
+      any_received_care_help,
+      levels = c(
+        "No care/help received",
+        "Received care/help"
+      )
+    )
+  ) %>%
+  ungroup() %>%
+  select(
+    idauniq,
+    any_received_care_help
+  )
+
+data11_additional_features <- data11_additional_features %>%
+  select(-any_of("any_received_care_help")) %>%
+  left_join(care_help_feature, by = "idauniq")
+
+```
+
+```{r}
+unmet_personal_care_feature <- data11_analysis_outcome_valid %>%
+  select(
+    idauniq,
+    capsac10
+  ) %>%
+  mutate(
+    capsac10_clean = case_when(
+      is.na(capsac10) ~ NA_real_,
+      as.numeric(capsac10) < 0 ~ NA_real_,
+      TRUE ~ as.numeric(capsac10)
+    ),
+    
+    unmet_personal_care_need = case_when(
+      capsac10_clean == 1 ~ "Unmet personal care need",
+      capsac10_clean == 0 ~ "No unmet personal care need",
+      TRUE ~ NA_character_
+    ),
+    
+    unmet_personal_care_need = factor(
+      unmet_personal_care_need,
+      levels = c(
+        "No unmet personal care need",
+        "Unmet personal care need"
+      )
+    )
+  ) %>%
+  select(
+    idauniq,
+    unmet_personal_care_need
+  )
+
+data11_additional_features <- data11_additional_features %>%
+  select(-any_of("unmet_personal_care_need")) %>%
+  left_join(unmet_personal_care_feature, by = "idauniq")
+
+```
+
+```{r}
+data11_analysis_outcome_valid %>%
+  count(sclddr, sort = TRUE) %>%
+  mutate(
+    pct = round(n / sum(n) * 100, 2)
+  )
+```
+
+
+# 13. Check additional feature missingness
+
+Additional features were checked for missingness at this stage, but features were not excluded here. Missingness-based exclusion is applied to the complete candidate feature set in the next script.
+
+```{r}
+check_all_missing <- function(data, id_cols = c("idauniq")) {
+  feature_cols <- setdiff(names(data), id_cols)
+  n_total <- nrow(data)
+
+  data %>%
+    select(all_of(feature_cols)) %>%
+    summarise(across(everything(), ~ sum(is.na(.x)))) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "variable",
+      values_to = "n_missing"
+    ) %>%
+    mutate(
+      n_total = n_total,
+      n_valid = n_total - n_missing,
+      missing_pct = round(n_missing / n_total * 100, 2)
+    ) %>%
+    select(
+      variable,
+      n_total,
+      n_missing,
+      n_valid,
+      missing_pct
+    ) %>%
+    arrange(desc(missing_pct), variable)
+}
+
+additional_missingness <- check_all_missing(data11_additional_features)
+
+additional_missingness
+```
+
+# 14. Merge base and additional candidate features
+
+The additional candidate variables were searched and constructed first, then merged with the full base candidate feature table. Variables already present in the base table, such as `volunteering_participation`, are not added a second time.
+
+```{r}
+data11_base_features <- readRDS(
+  file.path(processed_path, "07_wave11_ml_base_features.rds")
+)
+
+base_feature_vars <- readRDS(
+  file.path(processed_path, "07_base_candidate_features.rds")
+)
+
+dim(data11_base_features)
+length(base_feature_vars)
+```
+
+```{r}
+additional_feature_vars <- setdiff(
+  names(data11_additional_features),
+  c(
+    "idauniq",
+    "idahhw11",
+    "perid",
+    names(data11_base_features)
+  )
+)
+
+additional_feature_vars
+```
+
+```{r}
+data11_ml_candidate_features <- data11_base_features %>%
+  left_join(
+    data11_additional_features %>%
+      select(idauniq, all_of(additional_feature_vars)),
+    by = "idauniq",
+    relationship = "one-to-one"
+  )
+
+candidate_features_pre_screening <- c(
+  base_feature_vars,
+  additional_feature_vars
+)
+
+candidate_features_pre_screening <- intersect(
+  candidate_features_pre_screening,
+  names(data11_ml_candidate_features)
+)
+```
+
+```{r}
+data11_ml_candidate_features
+```
+
+
+```{r}
+dim(data11_ml_candidate_features)
+length(candidate_features_pre_screening)
+```
+
+The merged candidate dataset contains the three identifier columns, two outcome-related columns, and all base plus additional candidate features. These candidate features are screened together in the next script.
+
+```{r}
+saveRDS(
+  data11_ml_candidate_features,
+  file.path(processed_path, "07_wave11_ml_candidate_features_pre_screening.rds")
+)
+
+saveRDS(
+  candidate_features_pre_screening,
+  file.path(processed_path, "07_candidate_features_pre_screening.rds")
+)
+
+
+message("Saved: data/processed/07_wave11_ml_candidate_features_pre_screening.rds")
+message("Saved: data/processed/07_candidate_features_pre_screening.rds")
+```

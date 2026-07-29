@@ -1,0 +1,561 @@
+---
+title: "07_EDA03_feature_screening"
+author: "Yiwen Xiang"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    number_sections: true
+---
+
+This file screens the complete Wave 11 candidate feature set after base and additional features have been merged. Features are screened by missingness, respondent-level missingness, and sparse categorical distributions before the final modelling dataset is saved.
+
+# 1. Setup
+
+```{r, include=FALSE}
+source(here::here("script", "00_packages.R"))
+```
+
+# 2. Load merged candidate feature data
+
+```{r}
+data11_ml_pre_screening <- readRDS(
+  file.path(processed_path, "07_wave11_ml_candidate_features_pre_screening.rds")
+)
+
+candidate_features_pre_screening <- readRDS(
+  file.path(processed_path, "07_candidate_features_pre_screening.rds")
+)
+
+id_vars <- c("idauniq", "idahhw11", "perid")
+outcome_vars <- c("casp19_total", "qol_status")
+
+dim(data11_ml_pre_screening)
+length(candidate_features_pre_screening)
+```
+
+The merged candidate dataset contains the three identifier columns, two outcome-related columns, and all candidate predictors assembled from base and additional features.
+
+# 3. Outcome checks
+
+```{r}
+casp19_summary <- data11_ml_pre_screening %>%
+  summarise(
+    n = n(),
+    mean = round(mean(casp19_total, na.rm = TRUE), 2),
+    sd = round(sd(casp19_total, na.rm = TRUE), 2),
+    median = round(median(casp19_total, na.rm = TRUE), 2),
+    q1 = round(quantile(casp19_total, 0.25, na.rm = TRUE), 2),
+    q3 = round(quantile(casp19_total, 0.75, na.rm = TRUE), 2),
+    min = min(casp19_total, na.rm = TRUE),
+    max = max(casp19_total, na.rm = TRUE)
+  )
+
+casp19_summary
+```
+
+```{r}
+qol_distribution <- data11_ml_pre_screening %>%
+  count(qol_status, name = "n") %>%
+  mutate(percent = round(n / sum(n) * 100, 2))
+
+qol_distribution
+```
+
+# 4. Screen features by missingness
+
+All base and additional candidate features were screened together. Candidate features with more than 20% missingness were excluded before distribution checks.
+
+```{r}
+summarise_missingness <- function(data, variables) {
+  n_total <- nrow(data)
+
+  data %>%
+    select(all_of(variables)) %>%
+    summarise(across(everything(), ~ sum(is.na(.x)))) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "variable",
+      values_to = "n_missing"
+    ) %>%
+    mutate(
+      n_total = n_total,
+      n_valid = n_total - n_missing,
+      missing_percent = round(n_missing / n_total * 100, 2)
+    ) %>%
+    select(variable, n_total, n_missing, n_valid, missing_percent) %>%
+    arrange(desc(missing_percent), variable)
+}
+
+candidate_missingness_pre_screening <- summarise_missingness(
+  data11_ml_pre_screening,
+  candidate_features_pre_screening
+)
+
+candidate_missingness_pre_screening
+
+# export_xlsx(candidate_missingness_pre_screening, "07_candidate_missingness_pre_screening.xlsx", output_path)
+```
+
+```{r}
+high_missing_candidate_vars <- candidate_missingness_pre_screening %>%
+  filter(missing_percent > 20) %>%
+  pull(variable)
+
+high_missing_candidate_vars
+```
+
+```{r}
+data11_ml_feature_screened <- data11_ml_pre_screening %>%
+  select(-any_of(high_missing_candidate_vars))
+
+candidate_features_screened <- setdiff(
+  candidate_features_pre_screening,
+  high_missing_candidate_vars
+)
+
+length(candidate_features_screened)
+```
+
+After high-missingness features were excluded, `chronic_disease_count` was constructed from the seven chronic disease indicators retained for this purpose: arthritis, diabetes, cardiovascular disease, cancer, chronic lung disease/COPD, dementia/Alzheimer's disease, and asthma.
+
+```{r}
+chronic_disease_vars <- c(
+  "arthritis",
+  "diabetes",
+  "cvd",
+  "cancer",
+  "chronic_lung_disease",
+  "dementia_alzheimers",
+  "asthma"
+)
+
+missing_chronic_vars <- setdiff(
+  chronic_disease_vars,
+  names(data11_ml_feature_screened)
+)
+
+if (length(missing_chronic_vars) > 0) {
+  stop(
+    "The following chronic disease variables are not available after missingness screening: ",
+    paste(missing_chronic_vars, collapse = ", ")
+  )
+}
+
+data11_ml_feature_screened <- data11_ml_feature_screened %>%
+  mutate(
+    chronic_disease_count = rowSums(
+      across(
+        all_of(chronic_disease_vars),
+        ~ .x == "Yes"
+      ),
+      na.rm = TRUE
+    ),
+    chronic_disease_count = if_else(
+      if_all(all_of(chronic_disease_vars), is.na),
+      NA_integer_,
+      as.integer(chronic_disease_count)
+    )
+  )
+
+candidate_features_screened <- c(
+  candidate_features_screened,
+  "chronic_disease_count"
+)
+
+candidate_features_screened <- unique(candidate_features_screened)
+
+length(candidate_features_screened)
+```
+
+# 5. Screen respondents by candidate-feature missingness
+
+Respondent-level missingness was checked after high-missingness features had been removed. Respondents with more than 20% missing values across the screened candidate features were excluded before feature distribution checks.
+
+```{r}
+respondent_missingness <- data11_ml_feature_screened %>%
+  mutate(
+    n_missing_candidate_features =
+      rowSums(is.na(across(all_of(candidate_features_screened)))),
+    missing_candidate_percent =
+      round(
+        n_missing_candidate_features /
+          length(candidate_features_screened) * 100,
+        2
+      )
+  ) %>%
+  select(
+    all_of(id_vars),
+    n_missing_candidate_features,
+    missing_candidate_percent
+  )
+
+respondent_missingness %>%
+  count(n_missing_candidate_features, missing_candidate_percent, sort = TRUE)
+```
+
+```{r}
+high_missing_respondent_ids <- respondent_missingness %>%
+  filter(missing_candidate_percent > 20) %>%
+  pull(idauniq)
+
+respondent_missingness %>%
+  filter(idauniq %in% high_missing_respondent_ids)
+```
+
+```{r}
+data11_ml_screened <- data11_ml_feature_screened %>%
+  filter(!idauniq %in% high_missing_respondent_ids)
+
+dim(data11_ml_screened)
+```
+
+# 6. Check feature distributions
+
+```{r}
+continuous_vars_screened <- data11_ml_screened %>%
+  select(all_of(candidate_features_screened)) %>%
+  select(where(is.numeric)) %>%
+  names()
+
+continuous_summary_screened <- purrr::map_dfr(
+  continuous_vars_screened,
+  function(v) {
+    x <- data11_ml_screened[[v]]
+
+    tibble(
+      variable = v,
+      n_non_missing = sum(!is.na(x)),
+      n_missing = sum(is.na(x)),
+      missing_percent = round(mean(is.na(x)) * 100, 2),
+      mean = round(mean(x, na.rm = TRUE), 2),
+      median = round(median(x, na.rm = TRUE), 2),
+      sd = round(sd(x, na.rm = TRUE), 2),
+      min = min(x, na.rm = TRUE),
+      q1 = round(quantile(x, 0.25, na.rm = TRUE), 2),
+      q3 = round(quantile(x, 0.75, na.rm = TRUE), 2),
+      max = max(x, na.rm = TRUE)
+    )
+  }
+)
+
+continuous_summary_screened
+```
+
+```{r}
+categorical_vars_screened <- data11_ml_screened %>%
+  select(all_of(candidate_features_screened)) %>%
+  select(where(~ is.factor(.x) || is.character(.x))) %>%
+  names()
+
+categorical_distribution_screened <- data11_ml_screened %>%
+  select(all_of(categorical_vars_screened)) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "level"
+  ) %>%
+  count(variable, level, name = "n") %>%
+  group_by(variable) %>%
+  mutate(percent = round(n / sum(n) * 100, 2)) %>%
+  ungroup() %>%
+  arrange(variable, desc(n))
+
+categorical_distribution_screened
+```
+
+```{r}
+rare_candidate_categories <- categorical_distribution_screened %>%
+  filter(percent < 1) %>%
+  arrange(variable, percent)
+
+rare_candidate_categories
+```
+
+Categories below 1% were reviewed because very small categories may be unstable in model training. Three feature-level decisions were made after this review.
+
+First, the `Yes` category for `dementia_alzheimers` included very few respondents. Because `dementia_alzheimers` is a binary disease indicator, its categories directly represent disease status (`Yes` vs `No`). Merging the rare `Yes` category with `No` would remove the clinical meaning of the variable and incorrectly classify respondents with dementia/Alzheimer's disease as not having the condition. The disease information is already retained through `chronic_disease_count`, so `dementia_alzheimers` was removed as a standalone candidate feature.
+
+Second, the `Unmet personal care need` category in `unmet_personal_care_need` was very rare. Because this is also a binary indicator, merging the positive category with the negative category would change the meaning of the variable and misclassify respondents with unmet needs. Therefore, `unmet_personal_care_need` was removed as a standalone candidate feature.
+
+Third, `Other housing arrangement` in `housing_tenure` accounted for less than 1% of the screened sample, so it was combined with `Rent` as `Rent/other arrangement`.
+
+```{r}
+rare_category_feature_exclusions <- tibble::tribble(
+  ~variable, ~decision, ~reason,
+  "dementia_alzheimers", "Excluded from final candidate predictors", "The positive category was below 1%, and the disease information is retained in chronic_disease_count.",
+  "unmet_personal_care_need", "Excluded from final candidate predictors", "The positive category was below 1%, and the binary indicator could not be meaningfully merged."
+)
+
+rare_category_feature_exclusions
+```
+
+```{r}
+data11_ml_screened <- data11_ml_screened %>%
+  select(-any_of(c("dementia_alzheimers", "unmet_personal_care_need"))) %>%
+  mutate(
+    housing_tenure = case_when(
+      housing_tenure == "Own outright" ~ "Own outright",
+      housing_tenure == "Mortgage/shared ownership" ~ "Mortgage/shared ownership",
+      housing_tenure %in% c("Rent", "Other housing arrangement") ~
+        "Rent/other arrangement",
+      is.na(housing_tenure) ~ NA_character_,
+      TRUE ~ as.character(housing_tenure)
+    ),
+    housing_tenure = factor(
+      housing_tenure,
+      levels = c(
+        "Own outright",
+        "Mortgage/shared ownership",
+        "Rent/other arrangement"
+      )
+    )
+  )
+
+candidate_features_screened <- setdiff(
+  candidate_features_screened,
+  c("dementia_alzheimers", "unmet_personal_care_need")
+)
+
+candidate_features_screened <- intersect(
+  candidate_features_screened,
+  names(data11_ml_screened)
+)
+```
+
+```{r}
+categorical_distribution_after_recode <- data11_ml_screened %>%
+  select(all_of(candidate_features_screened)) %>%
+  select(where(~ is.factor(.x) || is.character(.x))) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "level"
+  ) %>%
+  count(variable, level, name = "n") %>%
+  group_by(variable) %>%
+  mutate(percent = round(n / sum(n) * 100, 2)) %>%
+  ungroup() %>%
+  arrange(variable, desc(n))
+
+categorical_distribution_after_recode %>%
+  filter(variable == "housing_tenure")
+```
+
+# 7. Save final Wave 11 modelling data
+
+```{r}
+missingness_exclusion_decisions <- tibble(
+  variable = high_missing_candidate_vars,
+  decision = "Excluded from final candidate predictors",
+  reason = "Missingness was greater than 20% in the merged candidate feature set."
+)
+
+predictor_screening_decisions <- bind_rows(
+  missingness_exclusion_decisions,
+  rare_category_feature_exclusions
+)
+
+print(predictor_screening_decisions, n = Inf)
+```
+
+```{r}
+data11_ml <- data11_ml_screened %>%
+  select(
+    all_of(id_vars),
+    all_of(outcome_vars),
+    all_of(candidate_features_screened)
+  )
+
+candidate_features <- setdiff(
+  names(data11_ml),
+  c(id_vars, outcome_vars)
+)
+
+dim(data11_ml)
+length(candidate_features)
+```
+
+```{r}
+candidate_missingness <- summarise_missingness(data11_ml, candidate_features)
+
+candidate_missingness
+```
+
+```{r}
+continuous_vars <- data11_ml %>%
+  select(all_of(candidate_features)) %>%
+  select(where(is.numeric)) %>%
+  names()
+
+categorical_vars <- data11_ml %>%
+  select(all_of(candidate_features)) %>%
+  select(where(~ is.factor(.x) || is.character(.x))) %>%
+  names()
+
+continuous_summary <- continuous_summary_screened %>%
+  filter(variable %in% continuous_vars)
+
+categorical_distribution <- categorical_distribution_after_recode %>%
+  filter(variable %in% categorical_vars)
+```
+
+```{r}
+saveRDS(
+  data11_ml,
+  file.path(processed_path, "07_wave11_ml_data.rds")
+)
+
+saveRDS(
+  candidate_features,
+  file.path(processed_path, "07_candidate_features.rds")
+)
+
+
+message("Wave 11 final ML dataset and EDA summary have been saved.")
+message("Saved: data/processed/07_wave11_ml_data.rds")
+message("Saved: data/processed/07_candidate_features.rds")
+```
+
+# 8. Final sample age and sex distributions
+
+The following plots describe the demographic composition of the final Wave 11 modelling dataset after feature and respondent screening.
+
+```{r}
+required_demographic_vars <- c("age", "sex")
+missing_demographic_vars <- setdiff(required_demographic_vars, names(data11_ml))
+
+if (length(missing_demographic_vars) > 0) {
+  stop(
+    "The following demographic variables are missing from data11_ml: ",
+    paste(missing_demographic_vars, collapse = ", ")
+  )
+}
+```
+
+```{r}
+age_distribution_plot <- data11_ml %>%
+  filter(!is.na(age)) %>%
+  ggplot(aes(x = age)) +
+  geom_histogram(
+    binwidth = 5,
+    boundary = 50,
+    closed = "left",
+    fill = "#6aa0a3",
+    color = "white",
+    linewidth = 0.25,
+    alpha = 0.9
+  ) +
+  scale_x_continuous(
+    breaks = seq(50, 90, by = 5),
+    labels = c(seq(50, 85, by = 5), "90+")
+  ) +
+  labs(
+    title = "Age distribution in the analytic sample",
+    x = "Age",
+    y = "Number of participants"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey88", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+age_distribution_plot
+```
+
+```{r}
+sex_distribution_plot_data <- data11_ml %>%
+  mutate(
+    sex_plot = case_when(
+      is.na(sex) ~ "Missing",
+      TRUE ~ as.character(sex)
+    ),
+    sex_plot = factor(
+      sex_plot,
+      levels = c("Male", "Female", "Missing")
+    )
+  ) %>%
+  count(sex_plot, name = "n") %>%
+  mutate(
+    percentage = n / sum(n) * 100,
+    label = paste0(
+      format(n, big.mark = ","),
+      " (",
+      round(percentage, 1),
+      "%)"
+    )
+  )
+
+sex_distribution_plot <- ggplot(
+  sex_distribution_plot_data,
+  aes(x = sex_plot, y = n, fill = sex_plot)
+) +
+  geom_col(width = 0.6, color = "white") +
+  geom_text(
+    aes(label = label),
+    vjust = -0.4,
+    size = 4
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Male" = "#74ADD1",
+      "Female" = "#F46D43",
+      "Missing" = "#BDBDBD"
+    )
+  ) +
+  scale_y_continuous(
+    labels = scales::comma,
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  labs(
+    title = "Sex distribution in the analytic sample",
+    x = "Sex",
+    y = "Number of participants",
+    fill = "Sex"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey88", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+sex_distribution_plot
+```
+
+```{r}
+ggsave(
+  filename = file.path(picture_path, "07_final_sample_age_distribution.png"),
+  plot = age_distribution_plot,
+  width = 7,
+  height = 4.5,
+  dpi = 300
+)
+
+ggsave(
+  filename = file.path(picture_path, "07_final_sample_sex_distribution.png"),
+  plot = sex_distribution_plot,
+  width = 6,
+  height = 4.5,
+  dpi = 300
+)
+
+message("Saved: pictures/07_final_sample_age_distribution.png")
+message("Saved: pictures/07_final_sample_sex_distribution.png")
+```

@@ -1,0 +1,13 @@
+.DS_Store
+.Rproj.user/
+
+# Restricted ELSA data and generated intermediate files are kept locally only.
+data/wave11/
+data/processed/
+
+# Large/model binary files should not be committed.
+*.rds
+*.RData
+*.cbm
+*.tab
+

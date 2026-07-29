@@ -1,0 +1,1473 @@
+---
+title: "07_EDA01_base_features"
+author: "Yiwen Xiang"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    number_sections: true
+---
+
+This file builds the base Wave 11 modelling dataset from the outcome-valid analytical sample and the matched predictor fields in `Preliminary Feature Selection.xlsx`. Additional candidate features are searched and added in `07_EDA02_additional_features.Rmd`.
+
+# 1. Setup
+
+```{r, include=FALSE}
+source(here::here("script", "00_packages.R"))
+
+w11_datasets <- readRDS(file.path(processed_path, "01_wave11_datasets.rds"))
+data11_main <- w11_datasets$w11_main
+data11_ifs <- w11_datasets$w11_ifs
+data11_financial <- w11_datasets$w11_financial
+data11_nurse <- w11_datasets$w11_nurse
+```
+
+
+
+```{r}
+data11_analysis_base <- readRDS(
+  file.path(processed_path, "06_wave11_outcome.rds")
+)
+
+data11_analysis_outcome_valid <- data11_analysis_base
+
+head(data11_analysis_base)
+```
+
+
+```{r}
+dim(data11_analysis_base)
+```
+
+```{r}
+selected_features <- readxl::read_excel(
+  here::here("data", "upload", "Preliminary Feature Selection.xlsx")
+)
+
+selected_features
+```
+
+```{r}
+feature_map <- selected_features %>%
+  mutate(
+    table = str_squish(as.character(table)),
+    column_name = str_squish(as.character(column_name)),
+    features = str_squish(as.character(features))
+  ) %>%
+  filter(!is.na(column_name), column_name != "")
+
+feature_map %>%
+  count(table)
+```
+
+```{r}
+financial_cols_needed <- feature_map %>%
+  filter(table == "w11_financial") %>%
+  pull(column_name) %>%
+  unique()
+
+financial_cols_needed
+```
+
+```{r}
+data11_financial_selected <- data11_financial %>%
+  select(idauniq, all_of(financial_cols_needed))
+
+data11_financial_selected
+```
+
+```{r}
+ifs_cols_needed <- feature_map %>%
+  filter(table == "w11_ifs") %>%
+  pull(column_name) %>%
+  unique()
+
+ifs_cols_needed
+```
+
+```{r}
+data11_ifs_selected <- data11_ifs %>%
+  select(idauniq, all_of(ifs_cols_needed))
+
+data11_ifs_selected
+```
+
+```{r}
+nurse_cols_needed <- feature_map %>%
+  filter(table == "w11_nurse") %>%
+  pull(column_name) %>%
+  unique()
+
+nurse_cols_needed
+```
+
+```{r}
+data11_nurse_selected <- data11_nurse %>%
+  select(idauniq, all_of(nurse_cols_needed))
+
+data11_nurse_selected
+```
+
+```{r}
+data11_analysis_full <- data11_analysis_base %>%
+  left_join(
+    data11_ifs_selected,
+    by = "idauniq",
+    relationship = "one-to-one"
+  ) %>%
+  left_join(
+    data11_financial_selected,
+    by = "idauniq",
+    relationship = "one-to-one"
+  ) %>%
+  left_join(
+    data11_nurse_selected,
+    by = "idauniq",
+    relationship = "one-to-one"
+  )
+```
+
+```{r}
+nrow(data11_analysis_base)
+nrow(data11_analysis_full)
+
+stopifnot(nrow(data11_analysis_base) == nrow(data11_analysis_full))
+```
+
+```{r}
+all_feature_cols <- feature_map %>%
+  pull(column_name) %>%
+  unique()
+
+id_cols <- intersect(
+  c("idauniq", "idahhw11", "perid","casp19_total"), 
+  names(data11_analysis_full)
+)
+
+data11_selected_features <- data11_analysis_full %>%
+  select(
+    all_of(id_cols),
+    all_of(all_feature_cols)
+  )
+
+data11_selected_features
+```
+
+```{r}
+dim(data11_selected_features)
+
+names(data11_selected_features)
+```
+At this stage, the outcome-valid analytical sample has been joined with the matched Wave 11 predictor fields from the main, IFS, financial and nurse datasets. The resulting dataset now contains the respondent identifiers, CASP-19 outcome variables, and the raw candidate feature columns needed for feature construction.
+
+The next step is to recode these raw variables into analysis-ready predictors. The following sections derive demographic, socioeconomic, physical health, mental health, social participation, behavioural, and cognitive variables before saving the pre-screening modelling dataset.
+
+# 3. Demographic variables
+
+Age, sex, marital or partnership status, and education level were recoded into analysis-ready variables.
+```{r}
+data11_selected_features %>%
+  count(indsex, sort = TRUE)
+```
+```{r}
+data11_selected_features %>%
+  summarise(
+    n_total = n(),
+    n_missing = sum(is.na(indsex)),
+    missing_percent = round(mean(is.na(indsex)) * 100, 2)
+  )
+```
+
+
+## 3.1 age
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    age = if_else(indager == -7, 90, indager)
+  )
+```
+
+## 3.2 sex
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    sex = case_when(
+      indsex == 1 ~ "Male",
+      indsex == 2 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+    sex = factor(
+      sex,
+      levels = c("Male", "Female")
+    )
+  )
+```
+
+## 3.3 education level
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    education_level = case_when(
+      fqendm %in% c(2, 3) ~ "Low education",
+      fqendm %in% c(4, 5) ~ "Middle education",
+      fqendm %in% c(6, 7) ~ "Post-secondary education",
+      fqendm == 8 ~ "Higher education",
+      fqendm %in% c(-9, -8, -1, 1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    education_level = factor(
+      education_level,
+      levels = c(
+        "Low education",
+        "Middle education",
+        "Post-secondary education",
+        "Higher education"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+## 3.4 marital / partnership status
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    marital_status = case_when(
+      dimarr %in% c(-9, -8, -1, -3) ~ NA_character_,
+      couple == 2 ~ "Cohabiting",
+      couple == 1 | dimarr %in% c(2, 3) ~ "Married/civil partnered",
+      dimarr == 1 ~ "Never married",
+      dimarr %in% c(4, 5) ~ "Separated/divorced",
+      dimarr == 6 ~ "Widowed",
+      TRUE ~ NA_character_
+    ),
+    marital_status = factor(
+      marital_status,
+      levels = c(
+        "Married/civil partnered",
+        "Cohabiting",
+        "Never married",
+        "Separated/divorced",
+        "Widowed"
+      )
+    )
+  )
+```
+
+
+
+# 4. Socioeconomic variables
+
+Wealth, work status, housing tenure, and financial difficulty were recoded using grouped categories suitable for modelling.
+## 4.1 wealth quintile
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    wealth_quintile = factor(
+      totwq5_bu_s,
+      levels = c(1, 2, 3, 4, 5),
+      labels = c(
+        "Lowest wealth quintile",
+        "Second wealth quintile",
+        "Middle wealth quintile",
+        "Fourth wealth quintile",
+        "Highest wealth quintile"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+## 4.2 Work status
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    dhwork = case_when(
+      dhwork == 1 ~ "Yes",
+      dhwork == 2 ~ "No",
+      dhwork == -1 ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    dhwork = factor(
+      dhwork,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+## 4.3 Housing tenure
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    housing_tenure = case_when(
+      hotenu == 1 ~ "Own outright",
+      hotenu %in% c(2, 3) ~ "Mortgage/shared ownership",
+      hotenu == 4 ~ "Rent",
+      hotenu %in% c(5, 6) ~ "Other housing arrangement",
+      hotenu %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    housing_tenure = factor(
+      housing_tenure,
+      levels = c(
+        "Own outright",
+        "Mortgage/shared ownership",
+        "Rent",
+        "Other housing arrangement"
+      )
+    )
+  )
+```
+
+## 4.4 Financial difficulty
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    financial_difficulty = case_when(
+      iafcon %in% c(1, 2) ~ "Low financial difficulty",
+      iafcon %in% c(3, 4) ~ "Moderate financial difficulty",
+      iafcon %in% c(5, 6) ~ "High financial difficulty",
+      iafcon %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    financial_difficulty = factor(
+      financial_difficulty,
+      levels = c(
+        "Low financial difficulty",
+        "Moderate financial difficulty",
+        "High financial difficulty"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+
+# 5. Physical health variables
+
+Self-rated health, limiting long-standing illness, chronic pain, eyesight, and hearing were recoded before deriving the physical health feature set.
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    self_rated_health = case_when(
+      hehelf == 1 ~ "Excellent",
+      hehelf == 2 ~ "Very good",
+      hehelf == 3 ~ "Good",
+      hehelf == 4 ~ "Fair",
+      hehelf == 5 ~ "Poor",
+      hehelf %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    self_rated_health = factor(
+      self_rated_health,
+      levels = c(
+        "Excellent",
+        "Very good",
+        "Good",
+        "Fair",
+        "Poor"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    long_standing_illness = case_when(
+      llsill == 0 ~ "No long-standing illness",
+      llsill == 1 ~ "Long-standing illness, not limiting",
+      llsill == 2 ~ "Limiting long-standing illness",
+      llsill %in% c(-9, -8, -3, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    long_standing_illness = factor(
+      long_standing_illness,
+      levels = c(
+        "No long-standing illness",
+        "Long-standing illness, not limiting",
+        "Limiting long-standing illness"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    chronic_pain = case_when(
+      hepain == 2 ~ "No chronic pain",
+      hepain == 1 & hepaa == 1 ~ "Mild pain",
+      hepain == 1 & hepaa == 2 ~ "Moderate pain",
+      hepain == 1 & hepaa == 3 ~ "Severe pain",
+      hepain %in% c(-9, -8, -1) ~ NA_character_,
+      hepain == 1 & hepaa %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    chronic_pain = factor(
+      chronic_pain,
+      levels = c(
+        "No chronic pain",
+        "Mild pain",
+        "Moderate pain",
+        "Severe pain"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    eyesight_problem = case_when(
+      heeye %in% c(1, 2, 3) ~ "Good eyesight",
+      heeye == 4 ~ "Fair eyesight",
+      heeye %in% c(5, 6) ~ "Poor eyesight/blind",
+      heeye %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    eyesight_problem = factor(
+      eyesight_problem,
+      levels = c(
+        "Good eyesight",
+        "Fair eyesight",
+        "Poor eyesight/blind"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    hearing_problem = case_when(
+      hehear %in% c(1, 2, 3) ~ "Good hearing",
+      hehear == 4 ~ "Fair hearing",
+      hehear == 5 ~ "Poor hearing",
+      hehear %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    hearing_problem = factor(
+      hearing_problem,
+      levels = c(
+        "Good hearing",
+        "Fair hearing",
+        "Poor hearing"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+
+# 6. Chronic disease indicators
+
+Disease indicators combine self-reported diagnosis and follow-up disease fields where available, so each condition has one analysis-ready binary variable.
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    arthritis = case_when(
+      hediadar == 1 | hedids3 == 1 | hehavear %in% c(1, 2) ~ "Yes",
+      
+      hediadar == 2 | hedids3 == 0 | hehavear == 3 ~ "No",
+      
+      hediadar %in% c(-9, -8, -1) &
+        hedids3 %in% c(-9, -8, -1) &
+        hehavear %in% c(-9, -8, -1) ~ NA_character_,
+      
+      TRUE ~ NA_character_
+    ),
+    arthritis = factor(
+      arthritis,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    diabetes = case_when(
+      hediaddi == 1 | hedids12 == 1 | hehavedi %in% c(1, 2) ~ "Yes",
+      
+      hediaddi == 2 | hedids12 == 0 | hehavedi == 3 ~ "No",
+      
+      hediaddi %in% c(-9, -8, -1) &
+        hedids12 %in% c(-9, -8, -1) &
+        hehavedi %in% c(-9, -8, -1) ~ NA_character_,
+      
+      TRUE ~ NA_character_
+    ),
+    diabetes = factor(
+      diabetes,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+```{r}
+cvd_previous_vars <- c(
+  "hediacah",  # previous diagnosis: abnormal heart rhythm
+  "hediacan",  # previous diagnosis: angina
+  "hediachf",  # previous diagnosis: congestive heart failure
+  "hediacmi",  # previous diagnosis: heart attack
+  "hediacoh"   # previous diagnosis: other heart condition
+)
+
+cvd_new_vars <- c(
+  "hediia95",  # new diagnosis: any other heart condition
+  "hediiam2",  # new diagnosis: angina
+  "hediiam3",  # new diagnosis: heart attack
+  "hediiam4",  # new diagnosis: congestive heart failure
+  "hediiam6"   # new diagnosis: abnormal heart rhythm
+)
+
+cvd_current_vars <- c(
+  "hehaveah",  # still has abnormal heart rhythm
+  "hehavean",  # still has angina
+  "hehavehf",  # still has congestive heart failure
+  "hehaveoh"   # still has other heart disease
+)
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    cvd_yes_signal = 
+      rowSums(across(all_of(cvd_previous_vars), ~ .x == 1), na.rm = TRUE) +
+      rowSums(across(all_of(cvd_new_vars), ~ .x == 1), na.rm = TRUE) +
+      rowSums(across(all_of(cvd_current_vars), ~ .x %in% c(1, 2)), na.rm = TRUE),
+    
+    cvd_no_signal =
+      rowSums(across(all_of(cvd_previous_vars), ~ .x == 2), na.rm = TRUE) +
+      rowSums(across(all_of(cvd_new_vars), ~ .x == 0), na.rm = TRUE) +
+      rowSums(across(all_of(cvd_current_vars), ~ .x == 3), na.rm = TRUE),
+    
+    cvd = case_when(
+      cvd_yes_signal > 0 ~ "Yes",
+      cvd_yes_signal == 0 & cvd_no_signal > 0 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    cvd = factor(
+      cvd,
+      levels = c("No", "Yes")
+    )
+  ) %>%
+  select(-cvd_yes_signal, -cvd_no_signal)
+```
+
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    stroke_yes_signal = 
+      as.integer(hediacst == 1) +
+      as.integer(hediiam7 == 1) +
+      as.integer(hemda1 == 1) +
+      as.integer(heothst == 1) +
+      as.integer(hepbs == 1),
+    
+    stroke = case_when(
+      stroke_yes_signal > 0 ~ "Yes",
+      stroke_yes_signal == 0 & hediacst == 2 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    stroke = factor(
+      stroke,
+      levels = c("No", "Yes")
+    )
+  ) %>%
+  select(-stroke_yes_signal)
+```
+
+
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    cancer = case_when(
+      hediadca == 1 | hedids5 == 1 | hehaveca %in% c(1, 2) ~ "Yes",
+      
+      hediadca == 2 | hedids5 == 0 ~ "No",
+      
+      hediadca %in% c(-9, -8, -1) &
+        hedids5 %in% c(-9, -8, -1) &
+        hehaveca %in% c(-9, -8, -1) ~ NA_character_,
+      
+      TRUE ~ NA_character_
+    ),
+    cancer = factor(
+      cancer,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    chronic_lung_disease = case_when(
+      hediadcl == 1 | hedids1 == 1 | hehavecl %in% c(1, 2) ~ "Yes",
+      
+      hediadcl == 2 | hedids1 == 0 | hehavecl == 3 ~ "No",
+      
+      hediadcl %in% c(-9, -8, -1) &
+        hedids1 %in% c(-9, -8, -1) &
+        hehavecl %in% c(-9, -8, -1) ~ NA_character_,
+      
+      TRUE ~ NA_character_
+    ),
+    chronic_lung_disease = factor(
+      chronic_lung_disease,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    hypertension = case_when(
+      hediacbp == 1 | hediiam1 == 1 | hehavebp %in% c(1, 2) ~ "Yes",
+      
+      hediacbp == 2 | hediiam1 == 0 | hehavebp == 3 ~ "No",
+      
+      hediacbp %in% c(-9, -8, -1) &
+        hediiam1 %in% c(-9, -8, -1) &
+        hehavebp %in% c(-9, -8, -1) ~ NA_character_,
+      
+      TRUE ~ NA_character_
+    ),
+    hypertension = factor(
+      hypertension,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    asthma = case_when(
+      hediadas == 1 | hedids2 == 1 | hehaveas %in% c(1, 2) ~ "Yes",
+      
+      hediadas == 2 | hedids2 == 0 | hehaveas == 3 ~ "No",
+      
+      hediadas %in% c(-9, -8, -1) &
+        hedids2 %in% c(-9, -8, -1) &
+        hehaveas %in% c(-9, -8, -1) ~ NA_character_,
+      
+      TRUE ~ NA_character_
+    ),
+    asthma = factor(
+      asthma,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+```{r}
+dementia_previous_vars <- c(
+  "hediadad",  # previous diagnosis of Alzheimer's disease
+  "hediaddm"   # previous diagnosis of dementia
+)
+
+dementia_new_vars <- c(
+  "hedids8",   # new diagnosis: Alzheimer's disease
+  "hedids9"    # new diagnosis: dementia
+)
+
+dementia_current_vars <- c(
+  "hehavead",  # still has Alzheimer's disease
+  "hehavedm"   # still has dementia
+)
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    dementia_yes_signal =
+      rowSums(across(all_of(dementia_previous_vars), ~ .x == 1), na.rm = TRUE) +
+      rowSums(across(all_of(dementia_new_vars), ~ .x == 1), na.rm = TRUE) +
+      rowSums(across(all_of(dementia_current_vars), ~ .x %in% c(1, 2)), na.rm = TRUE),
+    
+    dementia_no_signal =
+      rowSums(across(all_of(dementia_previous_vars), ~ .x == 2), na.rm = TRUE) +
+      rowSums(across(all_of(dementia_new_vars), ~ .x == 0), na.rm = TRUE) +
+      rowSums(across(all_of(dementia_current_vars), ~ .x == 3), na.rm = TRUE),
+    
+    dementia_alzheimers = case_when(
+      dementia_yes_signal > 0 ~ "Yes",
+      dementia_yes_signal == 0 & dementia_no_signal > 0 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    dementia_alzheimers = factor(
+      dementia_alzheimers,
+      levels = c("No", "Yes")
+    )
+  ) %>%
+  select(-dementia_yes_signal, -dementia_no_signal)
+```
+
+
+
+# 7. Functional limitation	
+ADL count (Activities of Daily Living), IADL count(Instrumental Activities of Daily Living), mobility limitation count, falls / fear of falling if available,receiving care / receiving help
+```{r}
+adl_vars <- c(
+  "headlba",
+  "headlbe",
+  "headldr",
+  "headlea",
+  "headlwa",
+  "headlwc"
+)
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    across(
+      all_of(adl_vars),
+      ~ if_else(.x %in% c(-9, -8, -3, -2, -1), NA_real_, as.numeric(.x))
+    ),
+    
+    adl_count = rowSums(
+      across(all_of(adl_vars), ~ .x == 1),
+      na.rm = TRUE
+    ),
+    
+    adl_count = if_else(
+      if_all(all_of(adl_vars), is.na),
+      NA_integer_,
+      as.integer(adl_count)
+    ),
+    
+    any_adl_limitation = case_when(
+      is.na(adl_count) ~ NA_character_,
+      adl_count == 0 ~ "No",
+      adl_count >= 1 ~ "Yes"
+    ),
+    
+    any_adl_limitation = factor(
+      any_adl_limitation,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+```{r}
+iadl_vars <- c(
+  "headlda",  # recognising physical danger
+  "headlho",  # doing work around house and garden
+  "headlma",  # using map
+  "headlme",  # taking medications
+  "headlmo",  # managing money
+  "headlph",  # making telephone calls
+  "headlpr",  # preparing hot meal
+  "headlsh",  # shopping for groceries
+  "headlsp"   # communication
+)
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    across(
+      all_of(iadl_vars),
+      ~ if_else(.x %in% c(-9, -8, -3, -2, -1), NA_real_, as.numeric(.x))
+    ),
+    
+    iadl_count = rowSums(
+      across(all_of(iadl_vars), ~ .x == 1),
+      na.rm = TRUE
+    ),
+    
+    iadl_count = if_else(
+      if_all(all_of(iadl_vars), is.na),
+      NA_integer_,
+      as.integer(iadl_count)
+    )
+  )
+```
+
+
+```{r}
+mobility_vars <- c(
+  "hemobch",  # getting up from chair
+  "hemobcl",  # climbing one flight of stairs
+  "hemobcs",  # climbing several flights of stairs
+  "hemobli",  # lifting or carrying weights over 10 pounds
+  "hemobpi",  # picking up 5p coin from table
+  "hemobpu",  # pulling or pushing large objects
+  "hemobre",  # reaching above shoulder level
+  "hemobsi",  # sitting 2 hours
+  "hemobst",  # stooping, kneeling or crouching
+  "hemobwa"   # walking 100 yards
+)
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    across(
+      all_of(mobility_vars),
+      ~ if_else(.x %in% c(-9, -8, -3, -2, -1), NA_real_, as.numeric(.x))
+    ),
+    
+    mobility_count = rowSums(
+      across(all_of(mobility_vars), ~ .x == 1),
+      na.rm = TRUE
+    ),
+    
+    mobility_count = if_else(
+      if_all(all_of(mobility_vars), is.na),
+      NA_integer_,
+      as.integer(mobility_count)
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    any_iadl_limitation = case_when(
+      is.na(iadl_count) ~ NA_character_,
+      iadl_count == 0 ~ "No",
+      iadl_count >= 1 ~ "Yes"
+    ),
+    any_mobility_limitation = case_when(
+      is.na(mobility_count) ~ NA_character_,
+      mobility_count == 0 ~ "No",
+      mobility_count >= 1 ~ "Yes"
+    ),
+    
+    any_iadl_limitation = factor(any_iadl_limitation, levels = c("No", "Yes")),
+    any_mobility_limitation = factor(any_mobility_limitation, levels = c("No", "Yes"))
+  )
+```
+
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    fall_count = case_when(
+      hefla == 2 ~ 0,
+      hefla == 1 & heflb >= 0 ~ as.numeric(heflb),
+      hefla %in% c(-9, -8, -1) ~ NA_real_,
+      hefla == 1 & heflb %in% c(-9, -8, -1) ~ NA_real_,
+      TRUE ~ NA_real_
+    ),
+    
+    fall_injury_status = case_when(
+      hefla == 2 ~ "No fall",
+      hefla == 1 & heflc == 1 ~ "Fall with serious injury",
+      hefla == 1 & heflc == 2 ~ "Fall without serious injury",
+      hefla %in% c(-9, -8, -1) ~ NA_character_,
+      hefla == 1 & heflc %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    
+    fall_injury_status = factor(
+      fall_injury_status,
+      levels = c(
+        "No fall",
+        "Fall without serious injury",
+        "Fall with serious injury"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+
+
+## 8. Mental health	
+depressive symptoms / CES-D score (Center for Epidemiologic Studies Depression Scale), sleep problems, anxiety symptoms / GAD-7 score
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    cesd_score = case_when(
+      cesd_na == 8 & cesd_sc >= 0 ~ as.numeric(cesd_sc),
+      cesd_na < 8 ~ NA_real_,
+      cesd_sc %in% c(-1, -2) ~ NA_real_,
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    restless_sleep = case_when(
+      pscedc == 1 ~ "Yes",
+      pscedc == 2 ~ "No",
+      pscedc %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    restless_sleep = factor(
+      restless_sleep,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+
+```{r}
+gad7_vars <- c(
+  "scafrai",  # afraid something awful might happen
+  "scanno",   # easily annoyed or irritable
+  "scanxe",   # anxious or on edge
+  "scresl",   # restless
+  "scrlax",   # trouble relaxing
+  "scwrys",   # not able to stop/control worrying
+  "scwryt"    # worried too much about different things
+)
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    across(
+      all_of(gad7_vars),
+      ~ case_when(
+        .x %in% c(-9, -8, -2, -1) ~ NA_real_,
+        .x %in% c(1, 2, 3, 4) ~ as.numeric(.x) - 1,
+        TRUE ~ NA_real_
+      ),
+      .names = "{.col}_score"
+    )
+  )
+```
+
+```{r}
+gad7_score_vars <- paste0(gad7_vars, "_score")
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    gad7_valid_n = rowSums(
+      !is.na(across(all_of(gad7_score_vars)))
+    ),
+    
+    anxiety_score = case_when(
+      gad7_valid_n == 7 ~ rowSums(across(all_of(gad7_score_vars))),
+      gad7_valid_n < 7 ~ NA_real_
+    )
+  )
+```
+
+
+
+## 9. Loneliness	
+loneliness score
+```{r}
+loneliness_vars <- c("scfeela", "scfeelb", "scfeelc")
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    across(
+      all_of(loneliness_vars),
+      ~ if_else(.x %in% c(-9, -8, -2, -1), NA_real_, as.numeric(.x))
+    ),
+    
+    loneliness_score = if_else(
+      if_any(all_of(loneliness_vars), is.na),
+      NA_real_,
+      rowSums(across(all_of(loneliness_vars)))
+    )
+  )
+```
+
+
+## 10. Social participation	
+social participation count, volunteering participation, internet use, social support / social relationship quality, caring responsibilities, food insecurity, subjective financial strain/subjective social status
+```{r}
+social_org_vars <- c(
+  "scorg95",  # other organisations/clubs/societies
+  "scorgch",  # charitable associations
+  "scorged",  # education, arts, music groups/evening classes
+  "scorgnw",  # tenants/resident/neighbourhood watch groups
+  "scorgpo",  # political party/trade union/environmental groups
+  "scorgrl",  # church or religious group
+  "scorgsc",  # social clubs
+  "scorgsp"   # sports clubs/gyms/exercise classes
+)
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    across(
+      all_of(c(social_org_vars, "scorg96")),
+      ~ if_else(.x %in% c(-9, -8, -2, -1), NA_real_, as.numeric(.x))
+    ),
+    
+    social_participation_count = rowSums(
+      across(all_of(social_org_vars), ~ .x == 1),
+      na.rm = TRUE
+    ),
+    
+    social_participation_count = case_when(
+      scorg96 == 1 ~ 0L,
+      
+      if_all(all_of(social_org_vars), is.na) ~ NA_integer_,
+      
+      TRUE ~ as.integer(social_participation_count)
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    volunteering_participation = case_when(
+      erfvoft == 1 ~ "At least once a week",
+      erfvoft == 2 ~ "At least once a month",
+      erfvoft == 3 ~ "Less often",
+      erfvoft == 4 ~ "One-off activity",
+      erfvoft %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    volunteering_participation = factor(
+      volunteering_participation,
+      levels = c(
+        "One-off activity",
+        "Less often",
+        "At least once a month",
+        "At least once a week"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    internet_help_frequency = case_when(
+      scinf == 1 ~ "Help all of the time",
+      scinf == 2 ~ "Help some of the time",
+      scinf == 3 ~ "Rarely or never help",
+      scinf %in% c(-9, -8, -2, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    internet_help_frequency = factor(
+      internet_help_frequency,
+      levels = c(
+        "Rarely or never help",
+        "Help some of the time",
+        "Help all of the time"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+```{r}
+# social relationship quality variables
+
+child_positive_vars <- c("scchda", "scchdb", "scchdc")
+child_negative_vars <- c("scchdd")
+
+family_positive_vars <- c("scfama", "scfamb", "scfamc")
+family_negative_vars <- c("scfamd")
+
+friend_positive_vars <- c("scfrda", "scfrdb", "scfrdc")
+friend_negative_vars <- c("scfrdd")
+
+partner_positive_vars <- c("scprta", "scprtb", "scprtc")
+partner_negative_vars <- c("scprtd")
+
+positive_support_vars <- c(
+  child_positive_vars,
+  family_positive_vars,
+  friend_positive_vars,
+  partner_positive_vars
+)
+
+negative_relationship_vars <- c(
+  child_negative_vars,
+  family_negative_vars,
+  friend_negative_vars,
+  partner_negative_vars
+)
+
+social_relationship_vars <- c(
+  positive_support_vars,
+  negative_relationship_vars
+)
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    across(
+      all_of(social_relationship_vars),
+      ~ if_else(.x %in% c(-9, -8, -2, -1), NA_real_, as.numeric(.x))
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    across(
+      all_of(positive_support_vars),
+      ~ case_when(
+        .x == 1 ~ 4,
+        .x == 2 ~ 3,
+        .x == 3 ~ 2,
+        .x == 4 ~ 1,
+        TRUE ~ NA_real_
+      ),
+      .names = "{.col}_score"
+    ),
+    
+    across(
+      all_of(negative_relationship_vars),
+      ~ case_when(
+        .x == 1 ~ 1,
+        .x == 2 ~ 2,
+        .x == 3 ~ 3,
+        .x == 4 ~ 4,
+        TRUE ~ NA_real_
+      ),
+      .names = "{.col}_score"
+    )
+  )
+```
+
+```{r}
+social_relationship_score_vars <- paste0(social_relationship_vars, "_score")
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    social_relationship_quality_score = if_else(
+      if_all(all_of(social_relationship_score_vars), is.na),
+      NA_real_,
+      rowMeans(across(all_of(social_relationship_score_vars)), na.rm = TRUE)
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    caring_responsibilities = case_when(
+      ercaa == 1 ~ "Yes",
+      ercaa == 2 ~ "No",
+      ercaa %in% c(-9, -8, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    caring_responsibilities = factor(
+      caring_responsibilities,
+      levels = c("No", "Yes")
+    )
+  )
+```
+
+
+```{r}
+food_insecurity_vars <- c("homeal", "scaffda", "scaffdb")
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    food_insecurity_yes_signal =
+      as.integer(homeal == 1) +
+      as.integer(scaffda %in% c(1, 2)) +
+      as.integer(scaffdb %in% c(1, 2)),
+    
+    food_insecurity_valid_n =
+      as.integer(homeal %in% c(1, 2)) +
+      as.integer(scaffda %in% c(1, 2, 3)) +
+      as.integer(scaffdb %in% c(1, 2, 3)),
+    
+    food_insecurity = case_when(
+      food_insecurity_yes_signal > 0 ~ "Yes",
+      food_insecurity_yes_signal == 0 & food_insecurity_valid_n > 0 ~ "No",
+      food_insecurity_valid_n == 0 ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    
+    food_insecurity = factor(
+      food_insecurity,
+      levels = c("No", "Yes")
+    )
+  ) %>%
+  select(
+    -food_insecurity_yes_signal,
+    -food_insecurity_valid_n
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    subjective_social_status = case_when(
+      sclddr %in% c(-9, -8, -2, -1) ~ NA_real_,
+      TRUE ~ as.numeric(sclddr)
+    )
+  )
+```
+
+
+## 11. Health behaviour	
+smoking status, alcohol consumption, BMI (Body Mass Index), physical activity
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    smoking_status = case_when(
+      smokerstat == 0 ~ "Never smoker",
+      smokerstat %in% c(1, 2, 3) ~ "Former smoker",
+      smokerstat == 4 ~ "Current smoker",
+      smokerstat %in% c(-9, -8, -2) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    smoking_status = factor(
+      smoking_status,
+      levels = c(
+        "Never smoker",
+        "Former smoker",
+        "Current smoker"
+      )
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    alcohol_status = case_when(
+      scako %in% c(1, 2, 3, 4, 5, 6, 7, 9) ~ "Drinker",
+      scako == 8 ~ "Non-drinker",
+      scako %in% c(-9, -8, -2, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    alcohol_status = factor(
+      alcohol_status,
+      levels = c("Non-drinker", "Drinker")
+    ),
+    
+    alcohol_frequency_group = case_when(
+      scako == 8 ~ "No alcohol in last 12 months",
+      scako == 7 ~ "Rarely",
+      scako %in% c(5, 6) ~ "Monthly or less",
+      scako %in% c(2, 3, 4) ~ "Weekly",
+      scako == 1 ~ "Almost every day",
+      scako == 9 ~ NA_character_,
+      scako %in% c(-9, -8, -2, -1) ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    alcohol_frequency_group = factor(
+      alcohol_frequency_group,
+      levels = c(
+        "No alcohol in last 12 months",
+        "Rarely",
+        "Monthly or less",
+        "Weekly",
+        "Almost every day"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+```{r}
+physical_activity_vars <- c("heacta", "heactb", "heactc")
+
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    across(
+      all_of(physical_activity_vars),
+      ~ if_else(.x %in% c(-9, -8, -1), NA_real_, as.numeric(.x))
+    ),
+    
+    physical_activity_level = case_when(
+      heacta %in% c(1, 2) ~ "Vigorous weekly",
+      heactb %in% c(1, 2) ~ "Moderate weekly",
+      heactc %in% c(1, 2) ~ "Mild weekly only",
+      if_any(all_of(physical_activity_vars), ~ .x == 3) ~ "Less than weekly",
+      if_all(all_of(physical_activity_vars), ~ .x == 4) ~ "Inactive",
+      TRUE ~ NA_character_
+    ),
+    
+    physical_activity_level = factor(
+      physical_activity_level,
+      levels = c(
+        "Inactive",
+        "Less than weekly",
+        "Mild weekly only",
+        "Moderate weekly",
+        "Vigorous weekly"
+      ),
+      ordered = TRUE
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    bmival_clean = if_else(
+      bmival %in% c(-9, -8, -1),
+      NA_real_,
+      as.numeric(bmival)
+    ),
+    
+    bmi_clean = if_else(
+      bmi %in% c(-9, -8, -1),
+      NA_real_,
+      as.numeric(bmi)
+    ),
+    
+    bmi_new = coalesce(bmival_clean, bmi_clean)
+  )
+```
+
+
+## 12. Cognition	
+memory score, orientation score
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    memory_score = case_when(
+      memtotb %in% c(-9, -3, -2, -1) ~ NA_real_,
+      TRUE ~ as.numeric(memtotb)
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    orientation_score = case_when(
+      cfdscr %in% c(-9, -8, -1) ~ NA_real_,
+      TRUE ~ as.numeric(cfdscr)
+    )
+  )
+```
+
+```{r}
+data11_selected_features <- data11_selected_features %>%
+  mutate(
+    receiving_help_count = case_when(
+      catno %in% c(-9, -8, -1) ~ NA_real_,
+      TRUE ~ as.numeric(catno)
+    )
+  )
+```
+
+
+Chronic disease count is not constructed at this stage. The individual disease indicators are kept for the pre-screening missingness check first; the disease count can be rebuilt later after high-missingness disease variables have been excluded.
+
+
+
+
+
+# 13. Save base modelling data
+
+At this stage, only the base features from the preliminary feature-selection table are retained. 
+
+```{r}
+base_feature_vars <- c(
+  "age",
+  "sex",
+  "education_level",
+  "marital_status",
+  "wealth_quintile",
+  "dhwork",
+  "housing_tenure",
+  "financial_difficulty",
+  "self_rated_health",
+  "long_standing_illness",
+  "chronic_pain",
+  "eyesight_problem",
+  "hearing_problem",
+  "arthritis",
+  "diabetes",
+  "cvd",
+  "stroke",
+  "cancer",
+  "chronic_lung_disease",
+  "hypertension",
+  "dementia_alzheimers",
+  "asthma",
+  "adl_count",
+  "iadl_count",
+  "mobility_count",
+  "fall_injury_status",
+  "cesd_score",
+  "restless_sleep",
+  "loneliness_score",
+  "social_participation_count",
+  "volunteering_participation",
+  "internet_help_frequency",
+  "social_relationship_quality_score",
+  "caring_responsibilities",
+  "smoking_status",
+  "alcohol_frequency_group",
+  "physical_activity_level",
+  "bmi_new",
+  "memory_score",
+  "orientation_score",
+  "food_insecurity",
+  "subjective_social_status",
+  "anxiety_score",
+  "receiving_help_count"
+)
+
+base_feature_vars
+```
+
+```{r}
+data11_base_features <- data11_selected_features %>%
+  select(
+    idauniq,
+    idahhw11,
+    perid,
+    casp19_total,
+    all_of(base_feature_vars)
+  ) %>%
+  mutate(
+    qol_cutoff = 35,
+    qol_status = case_when(
+      casp19_total <= qol_cutoff ~ "Low QoL",
+      casp19_total > qol_cutoff ~ "Non-low QoL",
+      TRUE ~ NA_character_
+    ),
+    qol_status = factor(
+      qol_status,
+      levels = c("Non-low QoL", "Low QoL")
+    )
+  ) %>%
+  select(
+    idauniq,
+    idahhw11,
+    perid,
+    casp19_total,
+    qol_status,
+    all_of(base_feature_vars)
+  )
+
+dim(data11_base_features)
+```
+
+```{r}
+data11_base_features
+```
+The base modelling dataset contains 5,314 respondents and 49 columns. These include three identifier columns (`idauniq`, `idahhw11`, and `perid`), two outcome-related columns (`casp19_total` and `qol_status`), and 44 base candidate predictor features. At this stage, the dataset keeps only the initial base feature set; additional candidate features will be searched and added in the next step.
+
+```{r}
+saveRDS(
+  data11_base_features,
+  file.path(processed_path, "07_wave11_ml_base_features.rds")
+)
+
+saveRDS(
+  base_feature_vars,
+  file.path(processed_path, "07_base_candidate_features.rds")
+)
+
+message("Saved: data/processed/07_wave11_ml_base_features.rds")
+message("Saved: data/processed/07_base_candidate_features.rds")
+```

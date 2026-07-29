@@ -1,0 +1,524 @@
+---
+title: "06 CASP-19 Outcome"
+author: "Yiwen Xiang"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    number_sections: true
+---
+
+# 06 CASP-19 Outcome
+
+This file constructs the CASP-19 total score and the binary low-QoL outcome. The cut-off was based on the distribution of CASP-19 total scores in the analytical sample: the lower quartile corresponded to a score of 35. Therefore, respondents with a CASP-19 total score <= 35 were classified as low QoL, while those with scores > 35 were classified as non-low QoL.
+
+## Load inputs
+
+```{r, include=FALSE}
+source(here::here("script", "00_packages.R"))
+source(here::here("script", "02_functions.R"))
+
+w11_datasets <- readRDS(file.path(processed_path, "01_wave11_datasets.rds"))
+data11_main <- w11_datasets$w11_main
+
+dataset_summary <- readRDS(file.path(processed_path, "01_wave11_dataset_summary.rds"))
+var_w11_all_labeled <- readRDS(file.path(processed_path, "03var_w11_all_labeled.rds"))
+value_dict_w11_all <- readRDS(file.path(processed_path, "03value_dict_w11_all.rds"))
+var_label_summary <- readRDS(file.path(processed_path, "03var_label_summary.rds"))
+
+picture_path <- here::here("pictures")
+```
+
+## Check imported data and metadata
+
+```{r}
+dataset_summary
+```
+
+```{r}
+head(var_w11_all_labeled)
+```
+
+```{r}
+var_label_summary
+```
+
+
+## Search CASP-19 / QoL outcome variables
+
+### Search CASP-19 item variables
+
+```{r}
+casp_general_search <- search_vars(
+  keywords = c(
+    "CASP",
+    "CASP-19",
+    "CASP19",
+    "quality of life",
+    "QoL",
+    "control autonomy self-realisation pleasure",
+    "control autonomy self-realization pleasure"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% names(w11_datasets))
+
+casp_general_search
+```
+
+### Search existing CASP-19 total score variable
+
+```{r}
+casp_score_search <- search_vars(
+  keywords = c(
+    "CASP score",
+    "CASP total",
+    "CASP total score",
+    "CASP-19 score",
+    "CASP19 score",
+    "CASP-19 total",
+    "CASP19 total",
+    "quality of life score",
+    "QoL score",
+    "QoL total",
+    "total quality of life",
+    "summary CASP",
+    "summed CASP",
+    "CASP scale",
+    "CASP index",
+    "life satisfaction score",
+    "wellbeing score",
+    "well-being score"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% names(w11_datasets))
+
+casp_score_search
+```
+
+No directly usable CASP-19 total score variable was confirmed in the searched
+metadata. Therefore, the total score is calculated from the 19 CASP items.
+
+### Load the analytical sample
+
+```{r}
+data11_analysis_base <- readRDS(
+  file.path(processed_path, "05_wave11_analysis_sample.rds")
+)
+
+data_casp <- data11_analysis_base
+
+nrow(data_casp)
+```
+
+
+## Confirm CASP-19 item variables
+
+```{r}
+# CASP-19 items are expected to be scqola to scqols.
+casp_items <- paste0("scqol", letters[1:19])
+
+casp_items
+```
+
+```{r}
+casp_items <- paste0("scqol", letters[1:19])
+
+negative_items <- c(
+  "scqola",
+  "scqolb",
+  "scqold",
+  "scqolf",
+  "scqolh",
+  "scqoli"
+)
+
+positive_items <- setdiff(casp_items, negative_items)
+
+casp_raw_items <- paste0(casp_items, "_raw")
+casp_score_items <- paste0(casp_items, "_score")
+
+casp_items
+negative_items
+positive_items
+```
+
+```{r}
+missing_casp_items <- setdiff(casp_items, names(data_casp))
+
+if (length(missing_casp_items) > 0) {
+  stop(
+    "These CASP-19 variables are missing from data_casp: ",
+    paste(missing_casp_items, collapse = ", ")
+  )
+}
+```
+
+## Check raw CASP-19 missingness and invalid codes
+
+```{r}
+casp_missing_raw <- purrr::map_dfr(casp_items, function(v) {
+  x <- suppressWarnings(as.numeric(data_casp[[v]]))
+  
+  tibble::tibble(
+    variable = v,
+    n_total = length(x),
+    n_raw_na = sum(is.na(x)),
+    n_negative_code = sum(!is.na(x) & x < 0),
+    n_outside_1_4_positive = sum(!is.na(x) & x >= 0 & !x %in% 1:4),
+    pct_negative_code = round(mean(!is.na(x) & x < 0) * 100, 2)
+  )
+})
+
+casp_missing_raw
+```
+
+## Create cleaned raw CASP item variables
+
+```{r}
+clean_casp_item <- function(x) {
+  x <- suppressWarnings(as.numeric(x))
+  
+  # ELSA negative response codes are treated as missing
+  x[x < 0] <- NA_real_
+  
+  # Valid raw CASP item responses should only be 1, 2, 3, or 4
+  x[!is.na(x) & !x %in% 1:4] <- NA_real_
+  
+  x
+}
+
+data_casp <- data_casp %>%
+  mutate(
+    across(
+      all_of(casp_items),
+      clean_casp_item,
+      .names = "{.col}_raw"
+    )
+  )
+```
+
+```{r}
+casp_clean_missing_by_item <- purrr::map_dfr(casp_raw_items, function(v) {
+  x <- data_casp[[v]]
+  
+  tibble::tibble(
+    variable = v,
+    n_missing = sum(is.na(x)),
+    pct_missing = round(mean(is.na(x)) * 100, 2),
+    n_valid = sum(!is.na(x)),
+    min_value = min(x, na.rm = TRUE),
+    max_value = max(x, na.rm = TRUE)
+  )
+})
+
+casp_clean_missing_by_item
+```
+
+
+## Count valid and missing CASP-19 items per participant
+```{r}
+data_casp <- data_casp %>%
+  mutate(
+    casp19_n_valid_items = rowSums(!is.na(select(., all_of(casp_raw_items)))),
+    casp19_n_missing_items = length(casp_raw_items) - casp19_n_valid_items
+  )
+
+table(data_casp$casp19_n_missing_items, useNA = "ifany")
+```
+
+```{r}
+data_casp %>%
+  summarise(
+    n_total = n(),
+    n_complete_19_items = sum(casp19_n_valid_items == 19),
+    n_incomplete_items = sum(casp19_n_valid_items < 19),
+    pct_complete_19_items = round(mean(casp19_n_valid_items == 19) * 100, 2)
+  )
+```
+This check shows that 5,314 of the 6,422 core Wave 11 respondents had complete CASP-19 item data. Since this study used a complete-case approach for the outcome variable, the 1,108 respondents with missing or invalid CASP-19 item responses were excluded from the outcome-valid analytical sample.
+
+
+## Recode CASP-19 items into 0-3 score variables
+Before calculating the CASP-19 total score, all items were recoded onto a 0-3 scale so that higher values consistently represented better QoL. Negatively worded items were scored as `raw response - 1`, while positively worded items were reverse-coded as `4 - raw response`. The 19 recoded item scores were then summed to create the CASP-19 total score, with a possible range from 0 to 57.
+```{r}
+for (v in negative_items) {
+  raw_var <- paste0(v, "_raw")
+  score_var <- paste0(v, "_score")
+  
+  data_casp[[score_var]] <- data_casp[[raw_var]] - 1
+}
+
+for (v in positive_items) {
+  raw_var <- paste0(v, "_raw")
+  score_var <- paste0(v, "_score")
+  
+  data_casp[[score_var]] <- 4 - data_casp[[raw_var]]
+}
+```
+
+```{r}
+casp_scored_range_check <- purrr::map_dfr(casp_score_items, function(v) {
+  x <- data_casp[[v]]
+  
+  tibble::tibble(
+    variable = v,
+    min_value = min(x, na.rm = TRUE),
+    max_value = max(x, na.rm = TRUE),
+    n_outside_0_3 = sum(!is.na(x) & !x %in% 0:3)
+  )
+})
+
+casp_scored_range_check
+```
+
+```{r}
+if (any(casp_scored_range_check$n_outside_0_3 > 0)) {
+  stop("Some scored CASP items are outside the expected range 0-3.")
+}
+```
+
+## Calculate CASP-19 total score
+```{r}
+data_casp <- data_casp %>%
+  mutate(
+    casp19_total = ifelse(
+      casp19_n_missing_items == 0,
+      rowSums(select(., all_of(casp_score_items)), na.rm = FALSE),
+      NA_real_
+    )
+  )
+```
+
+```{r}
+casp19_range_check <- data_casp %>%
+  summarise(
+    n_valid = sum(!is.na(casp19_total)),
+    n_missing = sum(is.na(casp19_total)),
+    min_score = min(casp19_total, na.rm = TRUE),
+    max_score = max(casp19_total, na.rm = TRUE),
+    n_below_0 = sum(casp19_total < 0, na.rm = TRUE),
+    n_above_57 = sum(casp19_total > 57, na.rm = TRUE)
+  )
+
+casp19_range_check
+```
+
+## Descriptive statistics for QoL score
+```{r}
+casp19_summary <- data_casp %>%
+  summarise(
+    n_total = n(),
+    n_valid = sum(!is.na(casp19_total)),
+    n_missing = sum(is.na(casp19_total)),
+    missing_pct = round(mean(is.na(casp19_total)) * 100, 2),
+    mean = round(mean(casp19_total, na.rm = TRUE), 2),
+    median = round(median(casp19_total, na.rm = TRUE), 2),
+    sd = round(sd(casp19_total, na.rm = TRUE), 2),
+    min = min(casp19_total, na.rm = TRUE),
+    q1 = round(quantile(casp19_total, 0.25, na.rm = TRUE), 2),
+    q3 = round(quantile(casp19_total, 0.75, na.rm = TRUE), 2),
+    max = max(casp19_total, na.rm = TRUE)
+  )
+
+casp19_summary
+```
+
+## Define low QoL using the fixed CASP-19 cutoff
+```{r}
+qol_q1_cutoff <- 35
+
+qol_q1_cutoff
+```
+
+```{r}
+data_casp <- data_casp %>%
+  mutate(
+    qol_group = case_when(
+      is.na(casp19_total) ~ NA_character_,
+      casp19_total <= qol_q1_cutoff ~ "Low QoL",
+      casp19_total > qol_q1_cutoff ~ "Non-low QoL"
+    ),
+    
+    low_qol = case_when(
+      is.na(casp19_total) ~ NA_real_,
+      casp19_total <= qol_q1_cutoff ~ 1,
+      casp19_total > qol_q1_cutoff ~ 0
+    ),
+    
+    qol_group = factor(
+      qol_group,
+      levels = c("Non-low QoL", "Low QoL")
+    )
+  )
+```
+
+```{r}
+qol_group_balance <- data_casp %>%
+  filter(!is.na(qol_group)) %>%
+  count(qol_group, name = "n") %>%
+  mutate(
+    pct = round(n / sum(n) * 100, 2)
+  )
+
+qol_group_balance
+```
+
+## Plot CASP-19 distribution
+
+
+The optimized plot first restricts the figure to respondents with valid CASP-19 total scores, which matches the complete-case outcome analysis and avoids missing-value warnings. The display range is controlled with `coord_cartesian()` rather than scale limits, so boundary values are not removed. The mean and lower-quartile cut-off lines are drawn as fixed-height segments and labelled directly in the plot, making the figure cleaner and easier to interpret.
+```{r}
+data_casp_plot <- data_casp %>%
+  filter(!is.na(casp19_total))
+
+mean_casp19 <- mean(data_casp_plot$casp19_total)
+
+y_line_top <- 490
+y_label_top <- 515
+
+casp19_distribution_plot <- ggplot(data_casp_plot, aes(x = casp19_total)) +
+  geom_histogram(
+    binwidth = 2,
+    boundary = 0,
+    closed = "left",
+    fill = "#74ADD1",
+    color = "white",
+    linewidth = 0.25,
+    alpha = 0.9
+  ) +
+  annotate(
+    "segment",
+    x = mean_casp19,
+    xend = mean_casp19,
+    y = 0,
+    yend = y_line_top,
+    color = "red",
+    linewidth = 1,
+    linetype = "dashed"
+  ) +
+  annotate(
+    "segment",
+    x = qol_q1_cutoff,
+    xend = qol_q1_cutoff,
+    y = 0,
+    yend = y_line_top,
+    color = "#2C7BB6",
+    linewidth = 1,
+    linetype = "dotted"
+  ) +
+  annotate(
+    "text",
+    x = mean_casp19,
+    y = y_label_top,
+    label = "Mean",
+    color = "red",
+    size = 3.5,
+    hjust = 0.5
+  ) +
+  annotate(
+    "text",
+    x = qol_q1_cutoff,
+    y = y_label_top,
+    label = "Q1 cut-off = 35",
+    color = "#2C7BB6",
+    size = 3.5,
+    hjust = 0.5
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 55, by = 5),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 500, by = 100),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  coord_cartesian(
+    xlim = c(0, 57),
+    ylim = c(0, 540),
+    clip = "off"
+  ) +
+  labs(
+    title = "Distribution of CASP-19 total score",
+    x = "CASP-19 total score",
+    y = "Number of participants"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey88", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+casp19_distribution_plot
+```
+
+```{r}
+ggsave(
+  filename = file.path(picture_path, "06_casp19_total_score_distribution.jpg"),
+  plot = casp19_distribution_plot,
+  width = 8.5,
+  height = 5.2,
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
+
+```
+
+
+### final output check
+```{r}
+list(
+  n_total = nrow(data_casp),
+  n_valid_casp19 = sum(!is.na(data_casp$casp19_total)),
+  n_missing_casp19 = sum(is.na(data_casp$casp19_total)),
+  casp19_min = min(data_casp$casp19_total, na.rm = TRUE),
+  casp19_max = max(data_casp$casp19_total, na.rm = TRUE),
+  q1_cutoff = qol_q1_cutoff,
+  low_qol_n = sum(data_casp$low_qol == 1, na.rm = TRUE),
+  non_low_qol_n = sum(data_casp$low_qol == 0, na.rm = TRUE)
+)
+```
+
+
+## Create the outcome-valid analytical sample
+```{r}
+# Create outcome-valid analysis sample
+
+data11_analysis_outcome_valid <- data_casp %>%
+  filter(
+    !is.na(casp19_total),
+    casp19_total >= 0,
+    casp19_total <= 57
+  )
+
+outcome_valid_summary <- tibble::tibble(
+  n_base_sample = nrow(data_casp),
+  n_outcome_valid = nrow(data11_analysis_outcome_valid),
+  n_outcome_excluded = nrow(data_casp) - nrow(data11_analysis_outcome_valid),
+  pct_outcome_excluded = round(
+    (nrow(data_casp) - nrow(data11_analysis_outcome_valid)) / nrow(data_casp) * 100,
+    2
+  )
+)
+
+outcome_valid_summary
+
+# Save outcome-valid full analysis sample
+
+saveRDS(
+  data11_analysis_outcome_valid,
+  file.path(processed_path, "06_wave11_outcome.rds")
+)
+```
+
+

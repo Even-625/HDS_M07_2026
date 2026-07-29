@@ -1,0 +1,145 @@
+---
+title: "03 Build Wave 11 Metadata"
+author: "Yiwen Xiang"
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 03 Build Wave 11 Metadata
+
+This script builds the labelled Wave 11 variable metadata and value-code dictionaries used for variable matching.
+If the imported Wave 11 RDS file is missing, it runs the Wave 11 import step first.
+
+## Load imported data and helper functions
+
+```{r}
+source(here::here("script", "00_packages.R"))
+source(here::here("script", "02_functions.R"))
+
+
+wave11_datasets_file <- file.path(processed_path, "01_wave11_datasets.rds")
+
+if (file.exists(wave11_datasets_file)) {
+  w11_datasets <- readRDS(wave11_datasets_file)
+} else {
+  message("Processed Wave 11 dataset RDS not found. Running 01_import_wave11.Rmd.")
+  # Use a temporary extracted R script so the submission folder keeps only the Rmd version.
+  source(knitr::purl(here::here("script", "01_import_wave11.Rmd"), output = tempfile(fileext = ".R"), quiet = TRUE))
+}
+```
+
+## List dictionary files
+
+```{r}
+dict_files <- tibble::tribble(
+  ~table, ~file_name,
+  "w11_main", "5050_wave_11_elsa_data_eul_data_dictionary.xlsx",
+  "w11_ifs", "5050_wave_11_ifs_derived_variables_ukda_data_dictionary.xlsx",
+  "w11_financial", "5050_wave_11_financial_derived_variables_ukda_data_dictionary.xlsx",
+  "w11_nurse", "5050_wave_11_elsa_nurse_data_eul_data_dictionary.xlsx",
+  "w11_pensiongrid", "5050_wave_11_elsa_pensiongrid_eul_data_dictionary.xlsx",
+  "w11_lifehistory", "5050_wave_11_elsa_lifehistory02_data_dictionary.xlsx",
+  "w11_eol", "5050_w11_elsa_eol_data_dictionary.xlsx"
+)
+```
+
+## Check required objects
+
+```{r}
+required_objects <- c(
+  "w11_datasets",
+  "dict_files",
+  "wave11_path",
+  "processed_path"
+)
+
+missing_objects <- required_objects[!sapply(required_objects, exists)]
+
+if (length(missing_objects) > 0) {
+  stop(
+    paste(
+      "Missing required objects:",
+      paste(missing_objects, collapse = ", ")
+    )
+  )
+}
+
+required_functions <- c(
+  "build_variable_dictionary",
+  "build_value_dictionary"
+)
+
+missing_functions <- required_functions[!sapply(required_functions, exists)]
+
+if (length(missing_functions) > 0) {
+  stop(
+    paste(
+      "Missing required functions:",
+      paste(missing_functions, collapse = ", ")
+    )
+  )
+}
+```
+
+## Build variable metadata
+
+```{r}
+var_w11_all_labeled <- build_variable_dictionary(
+  w11_datasets = w11_datasets,
+  dict_files = dict_files,
+  wave11_path = wave11_path
+)
+```
+
+## Build value-code dictionary
+
+```{r}
+value_dict_w11_all <- build_value_dictionary(
+  dict_files = dict_files,
+  wave11_path = wave11_path
+)
+```
+
+## Check metadata coverage
+
+```{r}
+var_label_summary <- var_w11_all_labeled %>%
+  dplyr::group_by(table) %>%
+  dplyr::summarise(
+    n_variables = dplyr::n(),
+    n_with_label = sum(!is.na(label)),
+    n_without_label = sum(is.na(label)),
+    pct_with_label = round(n_with_label / n_variables * 100, 2),
+    .groups = "drop"
+  )
+
+var_label_summary
+```
+
+## Save metadata objects
+
+```{r}
+saveRDS(
+  var_w11_all_labeled,
+  file.path(processed_path, "03var_w11_all_labeled.rds")
+)
+
+saveRDS(
+  value_dict_w11_all,
+  file.path(processed_path, "03value_dict_w11_all.rds")
+)
+
+saveRDS(
+  var_label_summary,
+  file.path(processed_path, "03var_label_summary.rds")
+)
+
+message("Wave 11 metadata has been built successfully.")
+message("Saved: data/processed/03var_w11_all_labeled.rds")
+message("Saved: data/processed/03value_dict_w11_all.rds")
+message("Saved: data/processed/03var_label_summary.rds")
+```
+

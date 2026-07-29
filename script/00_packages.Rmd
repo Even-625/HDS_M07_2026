@@ -1,0 +1,71 @@
+---
+title: "00 Packages"
+author: "Yiwen Xiang"
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 00 Packages
+
+This file loads the packages used in the analysis and defines the project paths used by later scripts.
+Packages should be installed before running the final scripts.
+
+## Load packages
+
+```{r}
+library(readr)
+library(readxl)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(writexl)
+library(purrr)
+library(tibble)
+library(tidyr)
+library(grid)
+library(labelled)
+library(here)
+library(haven)
+library(scales)
+
+library(rsample)
+library(forcats)
+library(tidymodels)
+library(yardstick)
+library(glmnet)
+library(ranger)
+library(xgboost)
+library(shapviz)
+library(workflows)
+library(recipes)
+library(catboost)
+library(nnet)
+library(themis)
+library(bonsai)
+library(lightgbm)
+```
+
+## Set project paths
+
+```{r}
+# Prevent R from automatically converting character variables to factors when reading them
+options(stringsAsFactors = FALSE)
+
+data_path <- here::here("data")
+raw_upload_path <- here::here("data", "upload")
+wave11_path <- here::here("data", "wave11")
+processed_path <- here::here("data", "processed")
+output_path <- here::here("output")
+picture_path <- here::here("pictures")
+```
+
+## Create output folders
+
+```{r}
+dir.create(processed_path, recursive = TRUE, showWarnings = FALSE)
+dir.create(output_path, recursive = TRUE, showWarnings = FALSE)
+dir.create(picture_path, recursive = TRUE, showWarnings = FALSE)
+```

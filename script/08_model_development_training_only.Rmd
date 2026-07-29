@@ -1,0 +1,2859 @@
+---
+title: "08_model_development_training_only"
+author: "Yiwen Xiang"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    number_sections: true
+---
+
+
+
+This file performs the Wave 11 machine-learning model-development analysis. All models use the same stratified 70/30 train-test split, but only the training set is used for feature screening, cross-validation, hyperparameter tuning, and final model fitting. Held-out test-set performance is evaluated separately in `09_heldout_test_evaluation.Rmd`.
+
+# 1. Setup
+
+```{r, include=FALSE}
+# Load the package setup first so the paths, modelling packages, and helper functions are available.
+source(here::here("script", "00_packages.R"))
+```
+
+
+```{r}
+# Read in the cleaned Wave 11 modelling data and the saved candidate feature list from the previous script.
+data11_training <- readRDS(
+  file.path(processed_path, "07_wave11_ml_data.rds")
+)
+
+candidate_features <- readRDS(
+  file.path(processed_path, "07_candidate_features.rds")
+)
+
+stopifnot(
+  length(candidate_features) == 42L,
+  !anyDuplicated(candidate_features),
+  all(candidate_features %in% names(data11_training))
+)
+
+head(data11_training)
+```
+```{r}
+# Print the candidate feature names once, so the modelling input list is easy to check.
+candidate_features
+```
+
+```{r}
+# Check the imported sample size and column count before creating analysis subsets.
+dim(data11_training)
+```
+
+```{r}
+# Create one stratified train-test split and save its IDs before any model development.
+set.seed(123)
+
+data11_split <- initial_split(
+  data11_training,
+  prop = 0.7,
+  strata = qol_status
+)
+
+data11_train <- training(data11_split)
+data11_test <- testing(data11_split)
+
+split_ids <- list(
+  train_idauniq = data11_train$idauniq,
+  test_idauniq = data11_test$idauniq
+)
+
+saveRDS(
+  split_ids,
+  file.path(processed_path, "08_train_test_split_ids.rds")
+)
+
+stopifnot(
+  length(
+    intersect(
+      split_ids$train_idauniq,
+      split_ids$test_idauniq
+    )
+  ) == 0
+)
+```
+
+
+# 2. ID variables, outcome variables, continuous variables, and categorical variables
+```{r}
+# Keep identifiers and outcomes separate from predictors before building the feature groups.
+id_vars <- c("idauniq", "idahhw11", "perid")
+outcome_vars <- c("casp19_total", "qol_status")
+```
+
+```{r}
+# Pull out the numeric candidate predictors for the continuous-variable checks and preprocessing.
+continuous_vars <- data11_training %>%
+  select(all_of(candidate_features)) %>%
+  select(where(is.numeric)) %>%
+  names()
+
+continuous_vars
+```
+
+```{r}
+# Pull out the factor candidate predictors so categorical variables can be handled separately.
+categorical_vars <- data11_training %>%
+  select(all_of(candidate_features)) %>%
+  select(where(is.factor)) %>%
+  names()
+
+categorical_vars
+```
+
+
+
+```{r}
+# Reshape the continuous predictors in the training set and scan their distributions before choosing imputation rules.
+continuous_long <- data11_train %>%
+  select(all_of(continuous_vars)) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  )
+
+ggplot(continuous_long, aes(x = value)) +
+  geom_histogram(bins = 30, fill = "#4C78A8", color = "white", na.rm = TRUE) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of continuous predictors in the training set",
+    x = "Value",
+    y = "Count"
+  )
+```
+
+```{r}
+# Use boxplots as a second quick check for skewness and extreme values in the continuous predictors.
+ggplot(continuous_long, aes(x = "", y = value)) +
+  geom_boxplot(fill = "#F2B701", color = "black", na.rm = TRUE) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  theme_minimal() +
+  labs(
+    title = "Boxplots of continuous predictors in the training set",
+    x = NULL,
+    y = "Value"
+  )
+```
+
+```{r}
+# Summarise missingness and spread for each continuous predictor in one table.
+continuous_summary <- map_dfr(
+  continuous_vars,
+  function(v) {
+    x <- data11_train[[v]]
+    
+    tibble(
+      variable = v,
+      n_non_missing = sum(!is.na(x)),
+      n_missing = sum(is.na(x)),
+      missing_percent = round(mean(is.na(x)) * 100, 2),
+      mean = round(mean(x, na.rm = TRUE), 2),
+      median = round(median(x, na.rm = TRUE), 2),
+      mean_minus_median = round(mean(x, na.rm = TRUE) - median(x, na.rm = TRUE), 2),
+      sd = round(sd(x, na.rm = TRUE), 2),
+      min = min(x, na.rm = TRUE),
+      q1 = quantile(x, 0.25, na.rm = TRUE),
+      q3 = quantile(x, 0.75, na.rm = TRUE),
+      max = max(x, na.rm = TRUE)
+    )
+  }
+)
+
+continuous_summary
+```
+Considering that most numerical predictive variables exhibit skewed distributions or are discrete count variables, the median of the training set is less susceptible to extreme values than the mean. Therefore, it is used to fill in the missing values of numerical variables. For categorical variables, missing values are encoded as a separate "Missing" category to retain the information that the missing pattern may contain, while avoiding the introduction of additional uncertainty from random filling.
+
+
+# 3. Train/test split checks
+
+
+```{r}
+# Check that the train and test sets have the expected sizes after splitting.
+dim(data11_train)
+dim(data11_test)
+```
+
+
+```{r}
+# Compare outcome balance in the train and test sets after stratification.
+data11_train %>%
+  count(qol_status) %>%
+  mutate(percent = round(n / sum(n) * 100, 2))
+
+data11_test %>%
+  count(qol_status) %>%
+  mutate(percent = round(n / sum(n) * 100, 2))
+```
+
+```{r}
+# Check whether the training-set CASP-19 first quartile is consistent with
+# the current Low QoL cut-off.
+# The main analysis defines Low QoL as CASP-19 <= 35.
+
+qol_cutoff_main <- 35
+
+casp19_q1_check <- tibble(
+  sample = "Training set",
+  n_non_missing_casp19 = sum(!is.na(data11_train$casp19_total)),
+  casp19_q1 = as.numeric(
+    quantile(data11_train$casp19_total, probs = 0.25, na.rm = TRUE)
+  )
+) %>%
+  mutate(
+    main_cutoff = qol_cutoff_main,
+    same_as_main_cutoff = abs(casp19_q1 - main_cutoff) < 1e-8
+  )
+
+casp19_q1_check
+```
+
+
+
+```{r}
+# Format the outcome counts for Table 1 across the full sample, training set, and test set.
+# Result: Table 1. Outcome distribution in analytical sample, training set and held-out test set
+
+make_outcome_distribution <- function(data, dataset_label) {
+  data %>%
+    count(qol_status, name = "n") %>%
+    mutate(
+      Dataset = dataset_label,
+      N = sum(n),
+      percent = round(n / N * 100, 1),
+      display = paste0(n, " (", percent, "%)")
+    ) %>%
+    select(Dataset, N, qol_status, display) %>%
+    pivot_wider(
+      names_from = qol_status,
+      values_from = display
+    )
+}
+
+table1_outcome_distribution <- bind_rows(
+  make_outcome_distribution(data11_training, "Full analytical sample"),
+  make_outcome_distribution(data11_train, "Training set"),
+  make_outcome_distribution(data11_test, "Held-out test set")
+) %>%
+  select(
+    Dataset,
+    N,
+    `Low QoL`,
+    `Non-low QoL`
+  ) %>%
+  rename(
+    `Low QoL n (%)` = `Low QoL`,
+    `Non-low QoL n (%)` = `Non-low QoL`
+  )
+
+table1_outcome_distribution
+```
+```{r}
+# Save the outcome distribution table
+write_xlsx(
+  table1_outcome_distribution,
+  file.path(output_path, "08_outcome_distribution.xlsx")
+)
+```
+
+```{r}
+# Save raw numeric values for the sample characteristics table.
+numeric_summary <- function(data, variable, dataset_label, stats = c("mean", "sd")) {
+  x <- data[[variable]]
+  
+  values <- c(
+    n = sum(!is.na(x)),
+    mean = mean(x, na.rm = TRUE),
+    sd = sd(x, na.rm = TRUE),
+    median = median(x, na.rm = TRUE),
+    q1 = quantile(x, 0.25, na.rm = TRUE, names = FALSE),
+    q3 = quantile(x, 0.75, na.rm = TRUE, names = FALSE)
+  )
+  
+  tibble(
+    dataset = dataset_label,
+    variable = variable,
+    statistic = stats,
+    value = round(as.numeric(values[stats]), 2)
+  )
+}
+
+category_summary <- function(data, variable, levels, output_name, dataset_label) {
+  x <- as.character(data[[variable]])
+  denominator <- sum(!is.na(x))
+  n <- sum(x %in% levels, na.rm = TRUE)
+  
+  tibble(
+    dataset = dataset_label,
+    variable = output_name,
+    statistic = c("n", "percent", "denominator"),
+    value = c(n, round(n / denominator * 100, 1), denominator)
+  )
+}
+
+make_sample_characteristics_raw <- function(data, dataset_label) {
+  bind_rows(
+    tibble(
+      dataset = dataset_label,
+      variable = "sample",
+      statistic = "n",
+      value = nrow(data)
+    ),
+    numeric_summary(data, "age", dataset_label, c("n", "mean", "sd")),
+    category_summary(data, "sex", "Female", "female", dataset_label),
+    category_summary(
+      data,
+      "financial_difficulty",
+      c("Moderate financial difficulty", "High financial difficulty"),
+      "moderate_high_financial_difficulty",
+      dataset_label
+    ),
+    category_summary(data, "self_rated_health", c("Fair", "Poor"), "fair_poor_self_rated_health", dataset_label),
+    category_summary(data, "long_standing_illness", "Limiting long-standing illness", "limiting_long_standing_illness", dataset_label),
+    numeric_summary(data, "mobility_count", dataset_label, c("n", "median", "q1", "q3")),
+    numeric_summary(data, "cesd_score", dataset_label, c("n", "median", "q1", "q3")),
+    numeric_summary(data, "anxiety_score", dataset_label, c("n", "median", "q1", "q3")),
+    numeric_summary(data, "loneliness_score", dataset_label, c("n", "median", "q1", "q3")),
+    numeric_summary(data, "social_relationship_quality_score", dataset_label, c("n", "mean", "sd")),
+    category_summary(data, "qol_status", c("Low QoL", "Low_QoL"), "low_qol", dataset_label)
+  )
+}
+
+sample_characteristics_raw <- bind_rows(
+  make_sample_characteristics_raw(data11_training, "Analytic sample"),
+  make_sample_characteristics_raw(data11_train, "Training set"),
+  make_sample_characteristics_raw(data11_test, "Held-out test set")
+)
+
+sample_characteristics_raw
+```
+
+
+```{r}
+# Save raw values for manual table formatting in Excel.
+write_xlsx(
+  list(
+    sample_characteristics_raw = sample_characteristics_raw
+  ),
+  file.path(output_path, "08_sample_characteristics_train_test.xlsx")
+)
+```
+
+
+## 3.1 Common classification metrics and helper settings
+```{r}
+# Use one shared metric set so all classification models are evaluated in the same way.
+# Low_QoL is the positive event for all classification metrics.
+options(yardstick.event_first = TRUE)
+
+classification_metrics <- metric_set(
+  roc_auc,
+  pr_auc,
+  accuracy,
+  precision,
+  sens,
+  spec,
+  f_meas
+)
+```
+
+
+# 4. LASSO logistic regression
+
+```{r}
+# Prepare the classification outcome and explicitly restrict predictors to the 42 candidate features.
+set.seed(123)
+
+
+data11_train_cls <- data11_train %>%
+  select(
+    qol_status,
+    all_of(candidate_features)
+  ) %>%
+  mutate(
+    qol_status = case_when(
+      as.character(qol_status) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+      as.character(qol_status) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+      TRUE ~ as.character(qol_status)
+    ),
+    qol_status = factor(qol_status, levels = c("Low_QoL", "Non_low_QoL")),
+    across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+  )
+```
+
+```{r}
+# Define the LASSO preprocessing recipe: impute, encode categories, drop zero-variance terms, then standardise.
+lasso_recipe <- recipe(qol_status ~ ., data = data11_train_cls) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  
+  step_unknown(all_nominal_predictors(), new_level = "Missing") %>%
+  
+  step_novel(all_nominal_predictors(), new_level = "New") %>%
+  
+  step_dummy(all_nominal_predictors()) %>%
+  
+  step_zv(all_predictors()) %>%
+  
+  step_normalize(all_numeric_predictors())
+```
+
+```{r}
+# Set up logistic LASSO with the penalty left for cross-validation to choose.
+lasso_model <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = 1
+) %>%
+  set_engine("glmnet")
+```
+
+```{r}
+# Combine the preprocessing recipe and logistic LASSO model into one workflow.
+lasso_workflow <- workflow() %>%
+  add_recipe(lasso_recipe) %>%
+  add_model(lasso_model)
+```
+
+```{r}
+# Create stratified folds so the low-QoL class is represented in each resample.
+set.seed(123)
+
+cv_folds <- vfold_cv(
+  data11_train_cls,
+  v = 10,
+  strata = qol_status
+)
+
+```
+
+```{r}
+# Set the lambda search range from weak to stronger penalisation.
+lambda_grid <- grid_regular(
+  penalty(range = c(-5, 0)),
+  levels = 50
+)
+```
+
+```{r}
+# Run cross-validation to find the lambda that gives the best held-out performance within training data.
+set.seed(123)
+
+lasso_tune <- tune_grid(
+  lasso_workflow,
+  resamples = cv_folds,
+  grid = lambda_grid,
+  metrics = classification_metrics
+)
+```
+
+```{r}
+# Inspect the tuning results before selecting the final lambda.
+lasso_metrics <- collect_metrics(lasso_tune)
+
+lasso_metrics
+```
+
+```{r}
+# Choose the LASSO penalty by ROC AUC, keeping the feature selection tied to classification performance.
+best_lambda <- select_best(
+  lasso_tune,
+  metric = "roc_auc"
+)
+
+best_lambda
+```
+
+```{r}
+# Refit the final logistic LASSO model on the full training set using the selected lambda.
+final_lasso_workflow <- finalize_workflow(
+  lasso_workflow,
+  best_lambda
+)
+
+final_lasso_fit <- fit(
+  final_lasso_workflow,
+  data = data11_train_cls
+)
+```
+
+```{r}
+# Extract the non-zero LASSO coefficients, which are the model terms retained after penalisation.
+lasso_selected_vars <- final_lasso_fit %>%
+  extract_fit_parsnip() %>%
+  tidy() %>%
+  filter(term != "(Intercept)") %>%
+  filter(estimate != 0) %>%
+  arrange(desc(abs(estimate)))
+
+lasso_selected_vars
+
+```
+
+The coefficient importance plot below aggregates retained logistic LASSO coefficients to the original-variable level. This keeps the interpretation focused on the top original predictors, rather than on individual dummy levels. The plot describes model-based predictive importance, not causal effects.
+
+```{r}
+# Aggregate non-zero logistic LASSO coefficients to original-variable importance.
+lasso_original_predictors <- setdiff(
+  names(data11_train_cls),
+  "qol_status"
+)
+
+lasso_variable_importance <- lasso_selected_vars %>%
+  mutate(
+    original_feature = map_chr(
+      term,
+      function(term_i) {
+        if (term_i %in% lasso_original_predictors) {
+          return(term_i)
+        }
+        
+        candidates <- lasso_original_predictors[
+          map_lgl(
+            lasso_original_predictors,
+            ~ str_starts(term_i, paste0(.x, "_"))
+          )
+        ]
+        
+        if (length(candidates) == 0) {
+          return(term_i)
+        }
+        
+        candidates[which.max(nchar(candidates))]
+      }
+    ),
+    abs_estimate = abs(estimate)
+  ) %>%
+  group_by(original_feature) %>%
+  summarise(
+    coefficient_importance = sqrt(sum(estimate^2)),
+    n_terms = n(),
+    dominant_term = term[which.max(abs_estimate)],
+    dominant_estimate = estimate[which.max(abs_estimate)],
+    terms = paste(term, collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(coefficient_importance)) %>%
+  mutate(rank = row_number())
+
+lasso_variable_importance
+```
+
+```{r}
+# Export the full logistic LASSO feature-importance results for audit and reporting.
+write_xlsx(
+  list(
+    original_feature_importance = lasso_variable_importance,
+    nonzero_model_terms = lasso_selected_vars
+  ),
+  file.path(output_path, "08_lasso_logistic_feature_importance.xlsx")
+)
+```
+
+```{r, fig.width=8, fig.height=6}
+# Plot the top 20 original features by logistic LASSO coefficient importance.
+lasso_variable_importance_top20 <- lasso_variable_importance %>%
+  slice_head(n = 20) %>%
+  mutate(
+    original_feature = factor(original_feature, levels = rev(original_feature)),
+    importance_label = sprintf("%.3f", coefficient_importance)
+  )
+
+lasso_logistic_importance_plot <- ggplot(
+  lasso_variable_importance_top20,
+  aes(
+    x = original_feature,
+    y = coefficient_importance
+  )
+) +
+  geom_col(fill = "#72B7B2", width = 0.75) +
+  geom_text(
+    aes(label = importance_label),
+    hjust = -0.1,
+    size = 3.1,
+    color = "grey25"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  coord_flip() +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      margin = margin(b = 8)
+    ),
+    plot.title.position = "plot",
+    axis.title = element_text(size = 12, face = "plain", color = "black"),
+    axis.text = element_text(size = 10, color = "grey35"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  labs(
+    title = "Variable-level importance from LASSO logistic regression",
+    x = "Original feature",
+    y = "Coefficient importance"
+  )
+
+lasso_logistic_importance_plot
+```
+
+```{r}
+# Export the logistic LASSO variable-level importance plot.
+ggsave(
+  filename = file.path(
+    picture_path,
+    "08_lasso_logistic_variable_importance_top20.png"
+  ),
+  plot = lasso_logistic_importance_plot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+```
+
+
+
+
+
+# 5. LASSO linear regression
+```{r}
+# Prepare the continuous-outcome dataset using the 42 candidate predictors.
+set.seed(123)
+
+data11_train_lm <- data11_train %>%
+  select(
+    casp19_total,
+    all_of(candidate_features)
+  ) %>%
+  mutate(
+    across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+  )
+```
+
+
+```{r}
+# Use the same preprocessing logic for the linear LASSO model, now predicting CASP-19 total score.
+lasso_lm_recipe <- recipe(casp19_total ~ ., data = data11_train_lm) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors(), new_level = "Missing") %>%
+  step_novel(all_nominal_predictors(), new_level = "New") %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+```
+
+
+```{r}
+# Set up linear LASSO and tune the penalty through cross-validation.
+lasso_lm_model <- linear_reg(
+  mode = "regression",
+  penalty = tune(),
+  mixture = 1
+) %>%
+  set_engine("glmnet")
+
+lasso_lm_workflow <- workflow() %>%
+  add_recipe(lasso_lm_recipe) %>%
+  add_model(lasso_lm_model)
+```
+
+
+```{r}
+# Create folds and the lambda grid for the continuous-outcome LASSO model.
+set.seed(123)
+
+cv_folds_lm <- vfold_cv(
+  data11_train_lm,
+  v = 10
+)
+
+lambda_grid_lm <- grid_regular(
+  penalty(range = c(-5, 0)),
+  levels = 50
+)
+```
+
+```{r}
+# Tune the linear LASSO using regression metrics on the training folds.
+set.seed(123)
+
+lasso_lm_tune <- tune_grid(
+  lasso_lm_workflow,
+  resamples = cv_folds_lm,
+  grid = lambda_grid_lm,
+  metrics = metric_set(rmse, rsq, mae)
+)
+```
+
+```{r}
+# Review the regression tuning results and choose the lambda with the lowest RMSE.
+lasso_lm_metrics <- collect_metrics(lasso_lm_tune)
+
+lasso_lm_metrics
+
+best_lambda_lm <- select_best(
+  lasso_lm_tune,
+  metric = "rmse"
+)
+
+best_lambda_lm
+```
+
+```{r}
+# Refit the final linear LASSO model on the full training set.
+final_lasso_lm_workflow <- finalize_workflow(
+  lasso_lm_workflow,
+  best_lambda_lm
+)
+
+final_lasso_lm_fit <- fit(
+  final_lasso_lm_workflow,
+  data = data11_train_lm
+)
+```
+
+```{r}
+# Extract the non-zero coefficients from the continuous-outcome LASSO model.
+lasso_lm_selected_vars <- final_lasso_lm_fit %>%
+  extract_fit_parsnip() %>%
+  tidy() %>%
+  filter(term != "(Intercept)") %>%
+  filter(estimate != 0) %>%
+  arrange(desc(abs(estimate)))
+
+lasso_lm_selected_vars
+
+```
+
+```{r}
+# Aggregate non-zero linear LASSO coefficients to original-variable importance.
+lasso_lm_original_predictors <- setdiff(
+  names(data11_train_lm),
+  "casp19_total"
+)
+
+lasso_lm_variable_importance <- lasso_lm_selected_vars %>%
+  mutate(
+    original_feature = map_chr(
+      term,
+      function(term_i) {
+        if (term_i %in% lasso_lm_original_predictors) {
+          return(term_i)
+        }
+        
+        candidates <- lasso_lm_original_predictors[
+          map_lgl(
+            lasso_lm_original_predictors,
+            ~ str_starts(term_i, paste0(.x, "_"))
+          )
+        ]
+        
+        if (length(candidates) == 0) {
+          return(term_i)
+        }
+        
+        candidates[which.max(nchar(candidates))]
+      }
+    ),
+    abs_estimate = abs(estimate)
+  ) %>%
+  group_by(original_feature) %>%
+  summarise(
+    coefficient_importance = sqrt(sum(estimate^2)),
+    n_terms = n(),
+    dominant_term = term[which.max(abs_estimate)],
+    dominant_estimate = estimate[which.max(abs_estimate)],
+    terms = paste(term, collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(coefficient_importance)) %>%
+  mutate(rank = row_number())
+
+lasso_lm_variable_importance
+```
+
+```{r}
+# Export the full linear LASSO feature-importance results for audit and reporting.
+write_xlsx(
+  list(
+    original_feature_importance = lasso_lm_variable_importance,
+    nonzero_model_terms = lasso_lm_selected_vars
+  ),
+  file.path(output_path, "08_lasso_linear_feature_importance.xlsx")
+)
+```
+
+```{r, fig.width=8, fig.height=6}
+# Plot the top 25 original features by linear LASSO coefficient importance.
+lasso_lm_variable_importance_top25 <- lasso_lm_variable_importance %>%
+  slice_head(n = 25) %>%
+  mutate(
+    original_feature = factor(original_feature, levels = rev(original_feature)),
+    importance_label = sprintf("%.3f", coefficient_importance)
+  )
+
+lasso_linear_importance_plot <- ggplot(
+  lasso_lm_variable_importance_top25,
+  aes(
+    x = original_feature,
+    y = coefficient_importance
+  )
+) +
+  geom_col(fill = "#A6CEE3", width = 0.75) +
+  geom_text(
+    aes(label = importance_label),
+    hjust = -0.1,
+    size = 3.1,
+    color = "grey25"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  coord_flip() +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      margin = margin(b = 8)
+    ),
+    plot.title.position = "plot",
+    axis.title = element_text(size = 12, face = "plain", color = "black"),
+    axis.text = element_text(size = 10, color = "grey35"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  labs(
+    title = "Variable-level importance from LASSO linear regression",
+    x = "Original feature",
+    y = "Coefficient importance"
+  )
+
+lasso_linear_importance_plot
+```
+
+```{r}
+# Export the linear LASSO variable-level importance plot.
+ggsave(
+  filename = file.path(
+    picture_path,
+    "08_lasso_linear_variable_importance_top25.png"
+  ),
+  plot = lasso_linear_importance_plot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+```
+
+
+
+# 6. Full-feature classification models
+
+The full-feature tree models are trained as comparison models before selecting the final 15-feature predictor set.
+
+## 6.1 Full-feature Random Forest
+```{r}
+# Prepare the full-feature classification data using the 42 candidate predictors.
+set.seed(123)
+
+data11_train_cls <- data11_train %>%
+  select(
+    qol_status,
+    all_of(candidate_features)
+  ) %>%
+  mutate(
+    qol_status = case_when(
+      as.character(qol_status) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+      as.character(qol_status) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+      TRUE ~ as.character(qol_status)
+    ),
+    qol_status = factor(qol_status, levels = c("Low_QoL", "Non_low_QoL")),
+    across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+  )
+```
+
+```{r}
+# Define the shared tree-model recipe, using one-hot dummy variables for algorithms that need numeric matrices.
+tree_recipe <- recipe(qol_status ~ ., data = data11_train_cls) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors(), new_level = "Missing") %>%
+  step_novel(all_nominal_predictors(), new_level = "New") %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors())
+
+```
+
+```{r}
+# Check how many predictors remain after dummy encoding and zero-variance filtering.
+tree_recipe_prep <- prep(
+  tree_recipe,
+  training = data11_train_cls
+)
+
+rf_predictor_n <- bake(
+  tree_recipe_prep,
+  new_data = NULL
+) %>%
+  select(-qol_status) %>%
+  ncol()
+
+rf_predictor_n
+```
+
+
+```{r}
+# Create stratified folds so the low-QoL class is represented in each resample.
+set.seed(123)
+
+cv_folds <- vfold_cv(
+  data11_train_cls,
+  v = 10,
+  strata = qol_status
+)
+```
+
+```{r}
+# Define the full-feature random forest and tune the main split and node-size parameters.
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = 500,
+  mtry = tune(),
+  min_n = tune()
+) %>%
+  set_engine(
+    "ranger",
+    importance = "impurity",
+    probability = TRUE
+  )
+
+```
+
+```{r}
+# Combine the full-feature tree recipe and random-forest model into a workflow.
+rf_workflow <- workflow() %>%
+  add_recipe(tree_recipe) %>%
+  add_model(rf_model)
+```
+
+```{r}
+# Build a compact random-forest tuning grid for mtry and minimum node size.
+set.seed(123)
+
+rf_grid <- grid_regular(
+  mtry(range = c(2, 20)),
+  min_n(range = c(5, 30)),
+  levels = 5
+)
+```
+
+
+```{r}
+# Tune the full-feature random forest on the training folds.
+set.seed(123)
+
+rf_tune <- tune_grid(
+  rf_workflow,
+  resamples = cv_folds,
+  grid = rf_grid,
+  metrics = classification_metrics
+)
+```
+
+```{r}
+# Collect the random-forest tuning results and pick the best ROC AUC setting.
+rf_metrics <- collect_metrics(rf_tune)
+
+best_rf <- select_best(
+  rf_tune,
+  metric = "roc_auc"
+)
+
+best_rf
+```
+
+```{r}
+# Fit the final full-feature random forest on the complete training set.
+final_rf_workflow <- finalize_workflow(
+  rf_workflow,
+  best_rf
+)
+
+set.seed(123)
+
+final_rf_fit <- fit(
+  final_rf_workflow,
+  data = data11_train_cls
+)
+```
+
+
+
+
+## 6.2 Full-feature XGBoost
+```{r}
+# Define the full-feature XGBoost model with its key hyperparameters exposed for tuning.
+xgb_model <- boost_tree(
+  mode = "classification",
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  min_n = tune(),
+  sample_size = tune(),
+  mtry = tune()
+) %>%
+  set_engine("xgboost")
+```
+
+```{r}
+# Combine the full-feature tree recipe and XGBoost model into a workflow.
+xgb_workflow <- workflow() %>%
+  add_recipe(tree_recipe) %>%
+  add_model(xgb_model)
+```
+
+```{r}
+# Use a space-filling grid to cover the XGBoost tuning space without making the search too large.
+set.seed(123)
+
+xgb_grid <- grid_space_filling(
+  trees(range = c(200, 800)),
+  tree_depth(range = c(2, 6)),
+  learn_rate(range = c(-4, -1)),
+  loss_reduction(range = c(-5, 1)),
+  min_n(range = c(5, 30)),
+  sample_size = sample_prop(range = c(0.6, 1.0)),
+  finalize(mtry(), data11_train_cls %>% select(-qol_status)),
+  size = 30
+)
+```
+
+```{r}
+# Tune the full-feature XGBoost model on the training folds.
+set.seed(123)
+
+xgb_tune <- tune_grid(
+  xgb_workflow,
+  resamples = cv_folds,
+  grid = xgb_grid,
+  metrics = classification_metrics
+)
+```
+
+```{r}
+# Collect XGBoost tuning results and select the best setting by ROC AUC.
+xgb_metrics <- collect_metrics(xgb_tune)
+
+best_xgb <- select_best(
+  xgb_tune,
+  metric = "roc_auc"
+)
+
+best_xgb
+```
+
+```{r}
+# Fit the final full-feature XGBoost model using the selected hyperparameters.
+final_xgb_workflow <- finalize_workflow(
+  xgb_workflow,
+  best_xgb
+)
+
+set.seed(123)
+
+final_xgb_fit <- fit(
+  final_xgb_workflow,
+  data = data11_train_cls
+)
+```
+
+
+
+## 6.3 XGBoost SHAP importance
+```{r}
+# Extract the fitted XGBoost engine and trained recipe for SHAP calculation.
+xgb_engine <- extract_fit_engine(final_xgb_fit)
+
+xgb_recipe <- extract_recipe(final_xgb_fit, estimated = TRUE)
+```
+
+```{r}
+# Bake the training data through the fitted recipe so SHAP uses the same encoded predictors as the model.
+xgb_train_processed <- bake(
+  xgb_recipe,
+  new_data = data11_train_cls
+) %>%
+  select(-qol_status)
+
+xgb_train_matrix <- as.matrix(xgb_train_processed)
+```
+
+```{r}
+# Calculate SHAP contributions on the encoded training matrix.
+shap_contrib <- predict(
+  xgb_engine,
+  newdata = xgb_train_matrix,
+  predcontrib = TRUE
+)
+
+if (is.null(colnames(shap_contrib))) {
+  colnames(shap_contrib) <- c(colnames(xgb_train_matrix), "BIAS")
+}
+
+shap_values <- shap_contrib[, colnames(shap_contrib) != "BIAS", drop = FALSE]
+```
+
+```{r}
+# Summarise mean absolute SHAP values for each encoded model term.
+shap_importance_dummy <- as_tibble(shap_values) %>%
+  summarise(
+    across(
+      everything(),
+      ~ mean(abs(.x), na.rm = TRUE)
+    )
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "term",
+    values_to = "mean_abs_shap"
+  ) %>%
+  arrange(desc(mean_abs_shap)) %>%
+  mutate(rank = row_number()) %>%
+  select(rank, term, mean_abs_shap)
+
+shap_importance_dummy
+```
+
+```{r}
+# Map encoded dummy terms back to their original variables for feature-level SHAP summaries.
+original_predictors <- setdiff(names(data11_train_cls), "qol_status")
+
+map_original_feature <- function(term) {
+  if (term %in% original_predictors) {
+    return(term)
+  }
+  
+  candidates <- original_predictors[
+    map_lgl(
+      original_predictors,
+      ~ str_starts(term, paste0(.x, "_"))
+    )
+  ]
+  
+  if (length(candidates) == 0) {
+    return(term)
+  }
+  
+  candidates[which.max(nchar(candidates))]
+}
+```
+
+```{r}
+# Aggregate SHAP values from dummy terms to original predictor names.
+shap_importance_feature <- shap_importance_dummy %>%
+  mutate(
+    original_feature = map_chr(term, map_original_feature)
+  ) %>%
+  group_by(original_feature) %>%
+  summarise(
+    mean_abs_shap = sum(mean_abs_shap),
+    n_terms = n(),
+    terms = paste(term, collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_abs_shap)) %>%
+  mutate(rank = row_number()) %>%
+  select(rank, original_feature, mean_abs_shap, n_terms, terms)
+
+shap_importance_feature
+```
+
+```{r}
+# Export the full-feature XGBoost SHAP importance results for audit and reporting.
+write_xlsx(
+  list(
+    original_feature_importance = shap_importance_feature,
+    encoded_term_importance = shap_importance_dummy
+  ),
+  file.path(output_path, "08_xgb_full_feature_shap_importance.xlsx")
+)
+```
+
+
+```{r}
+# Plot the top original predictors after SHAP values are aggregated across dummy terms.
+### Original feature-level SHAP importance
+xgb_shap_feature_importance_plot <- shap_importance_feature %>%
+  slice_head(n = 20) %>%
+  mutate(
+    importance_label = sprintf("%.3f", mean_abs_shap)
+  ) %>%
+  ggplot(
+    aes(
+      x = reorder(original_feature, mean_abs_shap),
+      y = mean_abs_shap
+    )
+  ) +
+  geom_col(fill = "#F58518") +
+  geom_text(
+    aes(label = importance_label),
+    hjust = -0.1,
+    size = 3.1,
+    color = "grey25"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  coord_flip() +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      margin = margin(b = 8)
+    ),
+    plot.title.position = "plot",
+    axis.title = element_text(size = 12, face = "plain", color = "black"),
+    axis.text = element_text(size = 10, color = "grey35")
+  ) +
+  labs(
+    title = "Top 20 SHAP important original features: Full-feature XGBoost",
+    x = "Original feature",
+    y = "Aggregated mean absolute SHAP value"
+  )
+
+xgb_shap_feature_importance_plot
+```
+
+```{r}
+# Export the XGBoost SHAP original-feature importance plot.
+ggsave(
+  filename = file.path(
+    picture_path,
+    "08_xgb_shap_original_feature_importance_top20.png"
+  ),
+  plot = xgb_shap_feature_importance_plot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+```
+
+```{r, fig.width=14, fig.height=6}
+# Combine logistic LASSO and full-feature XGBoost SHAP importance in one figure.
+combined_lasso_importance <- lasso_variable_importance %>%
+  slice_head(n = 20) %>%
+  arrange(coefficient_importance) %>%
+  mutate(
+    original_feature = factor(original_feature, levels = original_feature),
+    importance_label = sprintf("%.3f", coefficient_importance)
+  )
+
+combined_xgb_shap_importance <- shap_importance_feature %>%
+  slice_head(n = 20) %>%
+  arrange(mean_abs_shap) %>%
+  mutate(
+    original_feature = factor(original_feature, levels = original_feature),
+    importance_label = sprintf("%.3f", mean_abs_shap)
+  )
+
+lasso_importance_panel <- ggplot(
+  combined_lasso_importance,
+  aes(
+    x = original_feature,
+    y = coefficient_importance
+  )
+) +
+  geom_col(fill = "#72B7B2", width = 0.75) +
+  geom_text(
+    aes(label = importance_label),
+    hjust = -0.1,
+    size = 2.8,
+    color = "grey25"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  coord_flip() +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9, color = "grey35"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "(a) Full-feature LASSO logistic regression",
+    x = "Original predictor",
+    y = "Absolute coefficient importance"
+  )
+
+xgb_shap_importance_panel <- ggplot(
+  combined_xgb_shap_importance,
+  aes(
+    x = original_feature,
+    y = mean_abs_shap
+  )
+) +
+  geom_col(fill = "#F58518", width = 0.75) +
+  geom_text(
+    aes(label = importance_label),
+    hjust = -0.1,
+    size = 2.8,
+    color = "grey25"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  coord_flip() +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9, color = "grey35"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "(b) Full-feature XGBoost SHAP importance",
+    x = "Original predictor",
+    y = "Mean absolute SHAP value"
+  )
+
+draw_lasso_xgb_importance_combined <- function() {
+  grid.newpage()
+  pushViewport(viewport(layout = grid.layout(nrow = 1, ncol = 2)))
+  print(
+    lasso_importance_panel,
+    vp = viewport(layout.pos.row = 1, layout.pos.col = 1)
+  )
+  print(
+    xgb_shap_importance_panel,
+    vp = viewport(layout.pos.row = 1, layout.pos.col = 2)
+  )
+}
+
+draw_lasso_xgb_importance_combined()
+```
+LASSO logistic regression used the binary low QoL outcome as the dependent variable. Continuous predictors were standardised before modelling. For categorical predictors, the absolute coefficients of all dummy variables were combined at the original variable level. A threshold of 0.10 was used as an operational selection criterion for both XGBoost SHAP and LASSO logistic regression. Variables with an importance value greater than 0.10 in either method were retained. The union of the variables identified by the two methods was used as the final important-feature set. This threshold provided a transparent and consistent rule for reducing the number of variables and was not intended as a criterion for statistical significance. 
+
+As shown in Figure, each method identified 14 variables, of which 13 overlapped. Financial difficulty was identified only by XGBoost SHAP, while ADL count was identified only by LASSO logistic regression. After combining the variables identified by both methods, 15 important predictors were included in the final set and used to develop the subsequent important-feature models.
+
+  "loneliness_score",
+  "anxiety_score",
+  "cesd_score",
+  "social_relationship_quality_score",
+  "subjective_social_status",
+  "self_rated_health",
+  "sex",
+  "food_insecurity",
+  "physical_activity_level",
+  "social_participation_count",
+  "age",
+  "long_standing_illness",
+  "adl_count",
+  "mobility_count",
+  "financial_difficulty"
+
+```{r}
+# Export the combined LASSO logistic and XGBoost SHAP importance plot.
+png(
+  filename = file.path(
+    picture_path,
+    "08_lasso_logistic_and_xgb_shap_importance_top20_combined.png"
+  ),
+  width = 14,
+  height = 6,
+  units = "in",
+  res = 300
+)
+draw_lasso_xgb_importance_combined()
+dev.off()
+```
+
+```{r}
+# Create the SHAP beeswarm plot to show both importance and direction of prediction effects.
+### SHAP beeswarm plot
+shap_obj <- shapviz(
+  xgb_engine,
+  X_pred = xgb_train_matrix,
+  X = as.data.frame(xgb_train_processed)
+)
+
+sv_importance(
+  shap_obj,
+  kind = "beeswarm",
+  max_display = 20
+)
+```
+
+```{r}
+# Check that the SHAP output aligns with the model probability for Low_QoL.
+shap_log_odds <- rowSums(shap_contrib)
+
+shap_prob <- plogis(shap_log_odds)
+
+xgb_prob_check <- predict(
+  final_xgb_fit,
+  new_data = data11_train_cls,
+  type = "prob"
+) %>%
+  bind_cols(
+    tibble(shap_prob = shap_prob)
+  )
+
+cor(
+  xgb_prob_check$.pred_Low_QoL,
+  xgb_prob_check$shap_prob,
+  use = "complete.obs"
+)
+
+head(xgb_prob_check)
+```
+
+
+
+
+# 7. Models using the final 15 main features
+
+## 7.1 Define the final 15 important predictors and build the important-feature dataset
+
+The final 15 important predictors are fixed at this stage, after the full-feature
+models, LASSO-based predictor screening and XGBoost SHAP importance checks. The
+classification LASSO result is treated as the main reference because the main
+outcome is binary QoL status. LASSO linear regression and XGBoost SHAP are used
+as supporting evidence.
+
+```{r}
+# Fix the final 15 important predictors before building the reduced modelling dataset.
+selected_main_features <- c(
+  "loneliness_score",
+  "anxiety_score",
+  "cesd_score",
+  "social_relationship_quality_score",
+  "subjective_social_status",
+  "self_rated_health",
+  "sex",
+  "food_insecurity",
+  "physical_activity_level",
+  "social_participation_count",
+  "age",
+  "long_standing_illness",
+  "adl_count",
+  "mobility_count",
+  "financial_difficulty"
+)
+
+saveRDS(
+  selected_main_features,
+  file.path(processed_path, "08_main_features.rds")
+)
+
+selected_main_features
+```
+
+
+```{r} 
+# Create the important-feature dataset while keeping IDs and outcomes for later splitting.
+data11_lasso_selected <- data11_training %>%
+  select(
+    idauniq,
+    casp19_total,
+    qol_status,
+    all_of(selected_main_features)
+  )
+
+data11_lasso_selected
+```
+
+
+
+```{r}
+# Apply the original train-test split IDs to the important-feature dataset.
+set.seed(123)
+options(yardstick.event_first = TRUE)
+
+data11_lasso_train <- data11_lasso_selected %>%
+  filter(idauniq %in% data11_train$idauniq)
+```
+
+
+```{r}
+# Prepare important-feature classification data with the same factor coding as the full-feature models.
+data11_lasso_train_cls <- data11_lasso_train %>%
+  mutate(
+    qol_status = case_when(
+      as.character(qol_status) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+      as.character(qol_status) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+      TRUE ~ as.character(qol_status)
+    ),
+    qol_status = factor(qol_status, levels = c("Low_QoL", "Non_low_QoL")),
+    across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+  ) %>%
+  select(
+    -idauniq,
+    -casp19_total
+  )
+```
+
+```{r}
+# Check outcome balance again after reducing to the final important predictors.
+data11_lasso_train_cls %>%
+  count(qol_status) %>%
+  mutate(percent = round(n / sum(n) * 100, 2))
+```
+
+```{r}
+# Define the shared tree-model recipe, using one-hot dummy variables for algorithms that need numeric matrices.
+selected_tree_recipe <- recipe(qol_status ~ ., data = data11_lasso_train_cls) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors(), new_level = "Missing") %>%
+  step_novel(all_nominal_predictors(), new_level = "New") %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors())
+
+```
+
+```{r}
+# Check the encoded predictor count for the important-feature tree models.
+selected_tree_recipe_prep <- prep(
+  selected_tree_recipe,
+  training = data11_lasso_train_cls
+)
+
+selected_predictor_data <- bake(
+  selected_tree_recipe_prep,
+  new_data = NULL
+) %>%
+  select(-qol_status)
+
+selected_predictor_n <- ncol(selected_predictor_data)
+
+selected_predictor_n
+```
+```{r}
+# Create stratified folds for the important-feature classification models.
+set.seed(123)
+
+cv_folds_selected <- vfold_cv(
+  data11_lasso_train_cls,
+  v = 10,
+  strata = qol_status
+)
+```
+
+## 7.2 Important-feature LASSO logistic regression
+
+This model uses the same 15 important predictors as the important-feature RF, XGBoost, CatBoost and LightGBM models, so the later model comparison and ensemble analysis use a common predictor set.
+
+```{r}
+# Define the important-feature LASSO recipe for the reduced classification model.
+lasso_selected_recipe <- recipe(qol_status ~ ., data = data11_lasso_train_cls) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors(), new_level = "Missing") %>%
+  step_novel(all_nominal_predictors(), new_level = "New") %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+lasso_selected_model <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = 1
+) %>%
+  set_engine("glmnet")
+
+lasso_selected_workflow <- workflow() %>%
+  add_recipe(lasso_selected_recipe) %>%
+  add_model(lasso_selected_model)
+```
+
+```{r}
+# Use the same lambda range for the important-feature LASSO tuning step.
+set.seed(123)
+
+lasso_selected_grid <- grid_regular(
+  penalty(range = c(-5, 0)),
+  levels = 50
+)
+
+lasso_selected_tune <- tune_grid(
+  lasso_selected_workflow,
+  resamples = cv_folds_selected,
+  grid = lasso_selected_grid,
+  metrics = classification_metrics
+)
+
+lasso_selected_metrics <- collect_metrics(lasso_selected_tune)
+
+best_lasso_selected <- select_best(
+  lasso_selected_tune,
+  metric = "roc_auc"
+)
+
+best_lasso_selected
+
+final_lasso_selected_workflow <- finalize_workflow(
+  lasso_selected_workflow,
+  best_lasso_selected
+)
+
+final_lasso_selected_fit <- fit(
+  final_lasso_selected_workflow,
+  data = data11_lasso_train_cls
+)
+```
+
+
+
+
+## 7.3 Important-feature Random Forest
+```{r}
+# Define the important-feature random forest using the same tuning logic as the full-feature version.
+rf_selected_model <- rand_forest(
+  mode = "classification",
+  trees = 500,
+  mtry = tune(),
+  min_n = tune()
+) %>%
+  set_engine(
+    "ranger",
+    importance = "impurity",
+    probability = TRUE
+  )
+```
+
+```{r}
+# Combine the important-feature tree recipe and random-forest model into a workflow.
+rf_selected_workflow <- workflow() %>%
+  add_recipe(selected_tree_recipe) %>%
+  add_model(rf_selected_model)
+```
+
+```{r}
+# Create a smaller tuning grid suited to the reduced predictor set.
+set.seed(123)
+
+rf_selected_grid <- grid_regular(
+  mtry(range = c(2, 20)),
+  min_n(range = c(5, 30)),
+  levels = 5
+)
+```
+
+```{r}
+# Tune the important-feature random forest.
+set.seed(123)
+
+rf_selected_tune <- tune_grid(
+  rf_selected_workflow,
+  resamples = cv_folds_selected,
+  grid = rf_selected_grid,
+  metrics = classification_metrics
+)
+```
+
+```{r}
+# Collect important-feature random-forest tuning metrics and select the best ROC AUC setting.
+rf_selected_metrics <- collect_metrics(rf_selected_tune)
+
+best_rf_selected <- select_best(
+  rf_selected_tune,
+  metric = "roc_auc"
+)
+
+best_rf_selected
+
+final_rf_selected_workflow <- finalize_workflow(
+  rf_selected_workflow,
+  best_rf_selected
+)
+
+set.seed(123)
+
+final_rf_selected_fit <- fit(
+  final_rf_selected_workflow,
+  data = data11_lasso_train_cls
+)
+```
+
+
+
+## 7.4 Important-feature XGBoost
+```{r}
+# Define the important-feature XGBoost model.
+xgb_selected_model <- boost_tree(
+  mode = "classification",
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  min_n = tune(),
+  sample_size = tune(),
+  mtry = tune()
+) %>%
+  set_engine("xgboost")
+```
+
+```{r}
+# Combine the important-feature tree recipe and XGBoost model into a workflow.
+xgb_selected_workflow <- workflow() %>%
+  add_recipe(selected_tree_recipe) %>%
+  add_model(xgb_selected_model)
+```
+
+```{r}
+# Build the important-feature XGBoost tuning grid.
+set.seed(123)
+
+xgb_selected_grid <- grid_space_filling(
+  trees(range = c(200, 800)),
+  tree_depth(range = c(2, 6)),
+  learn_rate(range = c(-4, -1)),
+  loss_reduction(range = c(-5, 1)),
+  min_n(range = c(5, 30)),
+  sample_size = sample_prop(range = c(0.6, 1.0)),
+  finalize(mtry(), selected_predictor_data),
+  size = 30
+)
+```
+
+```{r}
+# Tune the important-feature XGBoost model.
+set.seed(123)
+
+xgb_selected_tune <- tune_grid(
+  xgb_selected_workflow,
+  resamples = cv_folds_selected,
+  grid = xgb_selected_grid,
+  metrics = classification_metrics
+)
+```
+
+```{r}
+# Collect important-feature XGBoost tuning metrics and choose the best setting.
+xgb_selected_metrics <- collect_metrics(xgb_selected_tune)
+
+best_xgb_selected <- select_best(
+  xgb_selected_tune,
+  metric = "roc_auc"
+)
+
+best_xgb_selected
+
+final_xgb_selected_workflow <- finalize_workflow(
+  xgb_selected_workflow,
+  best_xgb_selected
+)
+
+set.seed(123)
+
+final_xgb_selected_fit <- fit(
+  final_xgb_selected_workflow,
+  data = data11_lasso_train_cls
+)
+```
+
+
+
+# 8. CatBoost models
+
+## 8.1 CatBoost helper functions
+
+
+```{r}
+# Reset the shared classification settings before moving into the CatBoost section.
+set.seed(123)
+
+options(yardstick.event_first = TRUE)
+```
+
+```{r}
+# Define the CatBoost data-preparation helper, keeping categorical variables in a form CatBoost can handle natively.
+prepare_catboost_data <- function(train_data, test_data, outcome = "qol_status") {
+  
+  train_data <- train_data %>%
+    mutate(
+      !!outcome := case_when(
+        as.character(.data[[outcome]]) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+        as.character(.data[[outcome]]) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+        TRUE ~ as.character(.data[[outcome]])
+      ),
+      !!outcome := factor(.data[[outcome]], levels = c("Low_QoL", "Non_low_QoL")),
+      across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+    )
+  
+  test_data <- test_data %>%
+    mutate(
+      !!outcome := case_when(
+        as.character(.data[[outcome]]) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+        as.character(.data[[outcome]]) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+        TRUE ~ as.character(.data[[outcome]])
+      ),
+      !!outcome := factor(.data[[outcome]], levels = c("Low_QoL", "Non_low_QoL")),
+      across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+    )
+  
+  predictor_names <- setdiff(names(train_data), outcome)
+  
+  numeric_vars <- train_data %>%
+    select(all_of(predictor_names)) %>%
+    select(where(is.numeric)) %>%
+    names()
+  
+  categorical_vars <- train_data %>%
+    select(all_of(predictor_names)) %>%
+    select(where(~ is.factor(.x) || is.character(.x))) %>%
+    names()
+  
+  train_medians <- train_data %>%
+    summarise(
+      across(
+        all_of(numeric_vars),
+        ~ median(.x, na.rm = TRUE)
+      )
+    )
+  
+  for (v in numeric_vars) {
+    med_v <- train_medians[[v]]
+    train_data[[v]][is.na(train_data[[v]])] <- med_v
+    test_data[[v]][is.na(test_data[[v]])] <- med_v
+  }
+  
+  for (v in categorical_vars) {
+    train_data[[v]] <- as.factor(train_data[[v]])
+    test_data[[v]] <- as.factor(test_data[[v]])
+    
+    train_data[[v]] <- fct_na_value_to_level(train_data[[v]], level = "Missing")
+    test_data[[v]] <- fct_na_value_to_level(test_data[[v]], level = "Missing")
+    
+    train_levels <- levels(train_data[[v]])
+    train_levels <- union(train_levels, c("Missing", "New"))
+    
+    train_data[[v]] <- factor(as.character(train_data[[v]]), levels = train_levels)
+    
+    test_chr <- as.character(test_data[[v]])
+    test_chr[!(test_chr %in% train_levels)] <- "New"
+    test_data[[v]] <- factor(test_chr, levels = train_levels)
+  }
+  
+  list(
+    train = train_data,
+    test = test_data
+  )
+}
+```
+
+
+```{r}
+# Tune CatBoost manually because it is fitted outside the tidymodels workflow used above.
+# Hyperparameters are selected using training-set stratified 10-fold cross-validation,
+# matching the validation strategy used for the other main machine-learning models.
+tune_catboost <- function(train_data, outcome = "qol_status", grid_size = 15, n_folds = 10) {
+  
+  set.seed(123)
+  
+  cat_folds <- vfold_cv(
+    train_data,
+    v = n_folds,
+    strata = all_of(outcome)
+  )
+  
+  fold_data <- map(
+    seq_along(cat_folds$splits),
+    function(fold_i) {
+      cat_inner_data <- prepare_catboost_data(
+        train_data = analysis(cat_folds$splits[[fold_i]]),
+        test_data = assessment(cat_folds$splits[[fold_i]]),
+        outcome = outcome
+      )
+      
+      cat_inner_train <- cat_inner_data$train
+      cat_inner_valid <- cat_inner_data$test
+      
+      x_train <- cat_inner_train %>% select(-all_of(outcome))
+      y_train <- if_else(cat_inner_train[[outcome]] == "Low_QoL", 1, 0)
+      
+      x_valid <- cat_inner_valid %>% select(-all_of(outcome))
+      y_valid <- if_else(cat_inner_valid[[outcome]] == "Low_QoL", 1, 0)
+      
+      list(
+        fold = fold_i,
+        train_pool = catboost.load_pool(
+          data = x_train,
+          label = y_train
+        ),
+        valid_pool = catboost.load_pool(
+          data = x_valid,
+          label = y_valid
+        ),
+        y_valid = y_valid,
+        n_train = nrow(cat_inner_train),
+        n_validation = nrow(cat_inner_valid)
+      )
+    }
+  )
+  
+  set.seed(123)
+  
+  param_grid <- tibble(
+    iterations = sample(seq(300, 800, by = 100), grid_size, replace = TRUE),
+    depth = sample(3:6, grid_size, replace = TRUE),
+    learning_rate = runif(grid_size, 0.01, 0.10),
+    l2_leaf_reg = sample(c(1, 3, 5, 7, 10), grid_size, replace = TRUE),
+    random_strength = sample(c(1, 2, 5, 10), grid_size, replace = TRUE)
+  )
+  
+  tuning_results <- map_dfr(
+    seq_len(nrow(param_grid)),
+    function(i) {
+      
+      params <- list(
+        loss_function = "Logloss",
+        eval_metric = "AUC",
+        iterations = param_grid$iterations[i],
+        depth = param_grid$depth[i],
+        learning_rate = param_grid$learning_rate[i],
+        l2_leaf_reg = param_grid$l2_leaf_reg[i],
+        random_strength = param_grid$random_strength[i],
+        use_best_model = FALSE,
+        random_seed = 123,
+        thread_count = 4,
+        logging_level = "Silent",
+        allow_writing_files = FALSE
+      )
+      
+      fold_results <- map_dfr(
+        fold_data,
+        function(fold_i) {
+          model_i <- catboost.train(
+            learn_pool = fold_i$train_pool,
+            test_pool = fold_i$valid_pool,
+            params = params
+          )
+          
+          pred_raw <- catboost.predict(
+            model_i,
+            fold_i$valid_pool,
+            prediction_type = "Probability"
+          )
+          
+          pred_prob <- as.numeric(pred_raw)
+          
+          valid_pred <- tibble(
+            truth = factor(
+              if_else(fold_i$y_valid == 1, "Low_QoL", "Non_low_QoL"),
+              levels = c("Low_QoL", "Non_low_QoL")
+            ),
+            .pred_Low_QoL = pred_prob
+          )
+          
+          auc_i <- valid_pred %>%
+            roc_auc(
+              truth = truth,
+              .pred_Low_QoL,
+              event_level = "first"
+            ) %>%
+            pull(.estimate)
+          
+          pr_auc_i <- valid_pred %>%
+            pr_auc(
+              truth = truth,
+              .pred_Low_QoL,
+              event_level = "first"
+            ) %>%
+            pull(.estimate)
+          
+          rm(model_i)
+          gc(verbose = FALSE)
+          
+          tibble(
+            fold = fold_i$fold,
+            roc_auc = auc_i,
+            pr_auc = pr_auc_i,
+            n_train = fold_i$n_train,
+            n_validation = fold_i$n_validation
+          )
+        }
+      )
+      
+      bind_cols(
+        param_grid[i, ],
+        fold_results %>%
+          summarise(
+            roc_auc = mean(roc_auc, na.rm = TRUE),
+            pr_auc = mean(pr_auc, na.rm = TRUE),
+            roc_auc_sd = sd(roc_auc, na.rm = TRUE),
+            pr_auc_sd = sd(pr_auc, na.rm = TRUE),
+            n_folds = n()
+          )
+      )
+    }
+  )
+  
+  best_params <- tuning_results %>%
+    arrange(desc(roc_auc)) %>%
+    slice_head(n = 1)
+  
+  list(
+    tuning_results = tuning_results,
+    best_params = best_params
+  )
+}
+```
+
+
+## 8.2 Full-feature CatBoost
+```{r}
+# Prepare the full-feature CatBoost training object.
+cat_full_train_raw <- data11_train %>%
+  select(
+    qol_status,
+    all_of(candidate_features)
+  ) %>%
+  mutate(
+    across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+  )
+
+cat_full_data <- prepare_catboost_data(
+  train_data = cat_full_train_raw,
+  test_data = cat_full_train_raw,
+  outcome = "qol_status"
+)
+
+cat_full_train <- cat_full_data$train
+```
+
+```{r}
+# Tune the full-feature CatBoost model on the training data.
+set.seed(123)
+
+cat_full_tune <- tune_catboost(
+  train_data = cat_full_train_raw,
+  outcome = "qol_status",
+  grid_size = 15,
+  n_folds = 10
+)
+
+cat_full_tune$tuning_results
+cat_full_tune$best_params
+```
+
+```{r}
+# Create CatBoost pools for the final full-feature model fit.
+cat_full_x_train <- cat_full_train %>% select(-qol_status)
+
+cat_full_y_train <- if_else(cat_full_train$qol_status == "Low_QoL", 1, 0)
+
+cat_full_train_pool <- catboost.load_pool(
+  data = cat_full_x_train,
+  label = cat_full_y_train
+)
+
+best_full_params <- cat_full_tune$best_params
+
+cat_full_params <- list(
+  loss_function = "Logloss",
+  eval_metric = "AUC",
+  iterations = best_full_params$iterations,
+  depth = best_full_params$depth,
+  learning_rate = best_full_params$learning_rate,
+  l2_leaf_reg = best_full_params$l2_leaf_reg,
+  random_strength = best_full_params$random_strength,
+  use_best_model = FALSE,
+  random_seed = 123,
+  thread_count = 4,
+  logging_level = "Silent",
+  allow_writing_files = FALSE
+)
+
+final_cat_full_fit <- catboost.train(
+  learn_pool = cat_full_train_pool,
+  test_pool = NULL,
+  params = cat_full_params
+)
+```
+
+
+## 8.3 Important-feature CatBoost
+```{r}
+# Build the important-feature raw data frame for CatBoost.
+cat_selected_train_raw <- data11_lasso_selected %>%
+  filter(idauniq %in% data11_train$idauniq) %>%
+  select(
+    -idauniq,
+    -casp19_total
+  )
+
+cat_selected_data <- prepare_catboost_data(
+  train_data = cat_selected_train_raw,
+  test_data = cat_selected_train_raw,
+  outcome = "qol_status"
+)
+
+cat_selected_train <- cat_selected_data$train
+```
+
+```{r}
+# Tune the important-feature CatBoost model.
+set.seed(123)
+
+cat_selected_tune <- tune_catboost(
+  train_data = cat_selected_train_raw,
+  outcome = "qol_status",
+  grid_size = 15,
+  n_folds = 10
+)
+
+cat_selected_tune$tuning_results
+cat_selected_tune$best_params
+```
+
+```{r}
+# Create CatBoost pools for the important-feature final fit.
+cat_selected_x_train <- cat_selected_train %>% select(-qol_status)
+cat_selected_y_train <- if_else(cat_selected_train$qol_status == "Low_QoL", 1, 0)
+
+cat_selected_train_pool <- catboost.load_pool(
+  data = cat_selected_x_train,
+  label = cat_selected_y_train
+)
+
+best_selected_params <- cat_selected_tune$best_params
+
+cat_selected_params <- list(
+  loss_function = "Logloss",
+  eval_metric = "AUC",
+  iterations = best_selected_params$iterations,
+  depth = best_selected_params$depth,
+  learning_rate = best_selected_params$learning_rate,
+  l2_leaf_reg = best_selected_params$l2_leaf_reg,
+  random_strength = best_selected_params$random_strength,
+  use_best_model = FALSE,
+  random_seed = 123,
+  thread_count = 4,
+  logging_level = "Silent",
+  allow_writing_files = FALSE
+)
+
+final_cat_selected_fit <- catboost.train(
+  learn_pool = cat_selected_train_pool,
+  test_pool = NULL,
+  params = cat_selected_params
+)
+```
+
+
+
+
+
+
+
+
+
+# 9. LightGBM models
+
+```{r}
+# Wrap the LightGBM workflow in a helper so the full and important-feature runs stay comparable.
+develop_lightgbm_model <- function(train_data, model_name, grid_size = 30) {
+  
+  train_data <- train_data %>%
+    mutate(
+      qol_status = case_when(
+        as.character(qol_status) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+        as.character(qol_status) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+        TRUE ~ as.character(qol_status)
+      ),
+      qol_status = factor(qol_status, levels = c("Low_QoL", "Non_low_QoL"))
+    ) %>%
+    select(-any_of("casp19_total"))
+
+  lgbm_recipe <- recipe(qol_status ~ ., data = train_data) %>%
+    step_impute_median(all_numeric_predictors()) %>%
+    step_unknown(all_nominal_predictors(), new_level = "Missing") %>%
+    step_novel(all_nominal_predictors(), new_level = "New") %>%
+    step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+    step_zv(all_predictors())
+  
+  set.seed(123)
+  
+  lgbm_folds <- vfold_cv(
+    train_data,
+    v = 10,
+    strata = qol_status
+  )
+  
+  lgbm_model <- boost_tree(
+    mode = "classification",
+    trees = tune(),
+    tree_depth = tune(),
+    learn_rate = tune(),
+    loss_reduction = tune(),
+    min_n = tune(),
+    sample_size = tune()
+  ) %>%
+    set_engine("lightgbm")
+  
+  lgbm_workflow <- workflow() %>%
+    add_recipe(lgbm_recipe) %>%
+    add_model(lgbm_model)
+  
+  set.seed(123)
+  
+  lgbm_grid <- grid_space_filling(
+    trees(range = c(200, 800)),
+    tree_depth(range = c(2, 6)),
+    learn_rate(range = c(-4, -1)),
+    loss_reduction(range = c(-5, 1)),
+    min_n(range = c(5, 30)),
+    sample_size = sample_prop(range = c(0.6, 1.0)),
+    size = grid_size
+  )
+  
+  set.seed(123)
+  
+  lgbm_tune <- tune_grid(
+    lgbm_workflow,
+    resamples = lgbm_folds,
+    grid = lgbm_grid,
+    metrics = classification_metrics
+  )
+  
+  lgbm_tuning_metrics <- collect_metrics(lgbm_tune)
+  
+  best_lgbm <- select_best(
+    lgbm_tune,
+    metric = "roc_auc"
+  )
+  
+  final_lgbm_workflow <- finalize_workflow(
+    lgbm_workflow,
+    best_lgbm
+  )
+  
+  set.seed(123)
+  
+  final_lgbm_fit <- fit(
+    final_lgbm_workflow,
+    data = train_data
+  )
+
+  list(
+    model_name = model_name,
+    best_params = best_lgbm,
+    tuning_metrics = lgbm_tuning_metrics,
+    fit = final_lgbm_fit
+  )
+}
+```
+
+## 9.1 Full-feature LightGBM
+
+```{r}
+# Run the LightGBM helper on the full-feature dataset.
+set.seed(123)
+
+lgbm_full_result <- develop_lightgbm_model(
+  train_data = data11_train_cls,
+  model_name = "Full-feature LightGBM (42)",
+  grid_size = 30
+)
+
+lgbm_full_result$best_params
+```
+
+## 9.2 Important-feature LightGBM
+
+```{r}
+# Run the same LightGBM helper on the important-feature dataset.
+set.seed(123)
+
+lgbm_selected_result <- develop_lightgbm_model(
+  train_data = data11_lasso_train_cls,
+  model_name = "Important-feature LightGBM (15)",
+  grid_size = 30
+)
+
+lgbm_selected_result$best_params
+```
+
+## 9.3 Important-feature LightGBM SHAP bar plot
+
+The SHAP bar plot below ranks the final 15 selected predictors by their mean
+absolute contribution to the important-feature LightGBM model. This shows the
+relative model relevance of each predictor, rather than a causal correlation.
+
+```{r}
+# Extract the fitted LightGBM engine and trained preprocessing recipe.
+lgbm_selected_engine <- extract_fit_engine(lgbm_selected_result$fit)
+
+lgbm_selected_recipe <- extract_recipe(
+  lgbm_selected_result$fit,
+  estimated = TRUE
+)
+```
+
+```{r}
+# Bake the important-feature training data so SHAP uses the exact encoded inputs used by LightGBM.
+lgbm_selected_train_processed <- bake(
+  lgbm_selected_recipe,
+  new_data = data11_lasso_train_cls
+) %>%
+  select(-qol_status)
+
+lgbm_selected_train_matrix <- as.matrix(lgbm_selected_train_processed)
+storage.mode(lgbm_selected_train_matrix) <- "double"
+```
+
+```{r}
+# Calculate LightGBM SHAP contributions on the important-feature training matrix.
+lgbm_selected_shap_contrib <- predict(
+  lgbm_selected_engine,
+  newdata = lgbm_selected_train_matrix,
+  type = "contrib"
+)
+
+lgbm_selected_shap_contrib <- as.matrix(lgbm_selected_shap_contrib)
+
+if (ncol(lgbm_selected_shap_contrib) == ncol(lgbm_selected_train_matrix) + 1) {
+  colnames(lgbm_selected_shap_contrib) <- c(
+    colnames(lgbm_selected_train_matrix),
+    "BIAS"
+  )
+  
+  lgbm_selected_shap_values <- lgbm_selected_shap_contrib[
+    ,
+    seq_len(ncol(lgbm_selected_train_matrix)),
+    drop = FALSE
+  ]
+} else if (ncol(lgbm_selected_shap_contrib) == ncol(lgbm_selected_train_matrix)) {
+  colnames(lgbm_selected_shap_contrib) <- colnames(lgbm_selected_train_matrix)
+  lgbm_selected_shap_values <- lgbm_selected_shap_contrib
+} else {
+  stop(
+    "Unexpected number of SHAP contribution columns from LightGBM: ",
+    ncol(lgbm_selected_shap_contrib)
+  )
+}
+```
+
+```{r}
+# Summarise mean absolute SHAP values for each encoded LightGBM model term.
+lgbm_selected_shap_importance_dummy <- as_tibble(
+  lgbm_selected_shap_values,
+  .name_repair = "minimal"
+) %>%
+  summarise(
+    across(
+      everything(),
+      ~ mean(abs(.x), na.rm = TRUE)
+    )
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "term",
+    values_to = "mean_abs_shap"
+  ) %>%
+  arrange(desc(mean_abs_shap)) %>%
+  mutate(rank = row_number()) %>%
+  select(rank, term, mean_abs_shap)
+
+lgbm_selected_shap_importance_dummy
+```
+
+```{r}
+# Map one-hot encoded terms back to the original 15 selected feature names.
+lgbm_selected_original_predictors <- selected_main_features
+
+map_lgbm_selected_original_feature <- function(term) {
+  if (term %in% lgbm_selected_original_predictors) {
+    return(term)
+  }
+  
+  candidates <- lgbm_selected_original_predictors[
+    map_lgl(
+      lgbm_selected_original_predictors,
+      ~ str_starts(term, paste0(.x, "_"))
+    )
+  ]
+  
+  if (length(candidates) == 0) {
+    return(term)
+  }
+  
+  candidates[which.max(nchar(candidates))]
+}
+```
+
+```{r}
+# Aggregate dummy-level SHAP values to the original important-feature level.
+lgbm_selected_shap_importance_feature <- lgbm_selected_shap_importance_dummy %>%
+  mutate(
+    original_feature = map_chr(term, map_lgbm_selected_original_feature)
+  ) %>%
+  group_by(original_feature) %>%
+  summarise(
+    mean_abs_shap = sum(mean_abs_shap),
+    n_terms = n(),
+    terms = paste(term, collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  right_join(
+    tibble(original_feature = selected_main_features),
+    by = "original_feature"
+  ) %>%
+  mutate(
+    mean_abs_shap = replace_na(mean_abs_shap, 0),
+    n_terms = replace_na(n_terms, 0L),
+    terms = replace_na(terms, "No encoded terms after preprocessing")
+  ) %>%
+  arrange(desc(mean_abs_shap)) %>%
+  mutate(rank = row_number()) %>%
+  select(rank, original_feature, mean_abs_shap, n_terms, terms)
+
+saveRDS(
+  lgbm_selected_shap_importance_feature,
+  file.path(processed_path, "08_lightgbm_selected_shap_feature_importance.rds")
+)
+
+lgbm_selected_shap_importance_feature
+```
+
+```{r}
+# Plot the 15 important predictors by aggregated mean absolute SHAP value.
+lgbm_selected_shap_feature_importance_plot <- lgbm_selected_shap_importance_feature %>%
+  ggplot(
+    aes(
+      x = reorder(original_feature, mean_abs_shap),
+      y = mean_abs_shap
+    )
+  ) +
+  geom_col(fill = "#74ADD1") +
+  coord_flip() +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      margin = margin(b = 8)
+    ),
+    plot.title.position = "plot",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(size = 11, face = "plain", color = "black"),
+    axis.text = element_text(size = 10, color = "grey35")
+  ) +
+  labs(
+    title = "SHAP Predictor Importance (LightGBM)",
+    x = "Important predictor",
+    y = "Aggregated mean absolute SHAP value"
+  )
+
+lgbm_selected_shap_feature_importance_plot
+```
+
+```{r}
+# Export the LightGBM important-feature SHAP bar plot.
+ggsave(
+  filename = file.path(
+    picture_path,
+    "08_lightgbm_selected_shap_feature_importance_top15.png"
+  ),
+  plot = lgbm_selected_shap_feature_importance_plot,
+  width = 8,
+  height = 5.5,
+  dpi = 300
+)
+```
+
+# 10. MLP models
+
+## 10.1 Full-feature MLP
+```{r}
+# Define the full-feature MLP recipe with scaling before dummy encoding.
+mlp_full_recipe <- recipe(qol_status ~ ., data = data11_train_cls) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors(), new_level = "Missing") %>%
+  step_novel(all_nominal_predictors(), new_level = "New") %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors())
+```
+
+```{r}
+# Set up the MLP model and tune hidden units, regularisation, and epochs.
+mlp_model <- mlp(
+  mode = "classification",
+  hidden_units = tune(),
+  penalty = tune(),
+  epochs = tune()
+) %>%
+  set_engine(
+    "nnet",
+    trace = FALSE,
+    MaxNWts = 50000
+  )
+```
+
+```{r}
+# Combine the full-feature MLP recipe and neural-network model into a workflow.
+mlp_full_workflow <- workflow() %>%
+  add_recipe(mlp_full_recipe) %>%
+  add_model(mlp_model)
+```
+
+```{r}
+# Create stratified folds for MLP tuning.
+set.seed(123)
+
+cv_folds_mlp <- vfold_cv(
+  data11_train_cls,
+  v = 10,
+  strata = qol_status
+)
+```
+
+```{r}
+# Use a small MLP grid to keep neural-network tuning manageable.
+mlp_grid <- expand_grid(
+  hidden_units = c(3, 5, 10),
+  penalty = c(0.0001, 0.001, 0.01),
+  epochs = c(100, 200)
+)
+
+mlp_grid
+```
+
+```{r}
+# Tune the full-feature MLP.
+set.seed(123)
+
+mlp_full_tune <- tune_grid(
+  mlp_full_workflow,
+  resamples = cv_folds_mlp,
+  grid = mlp_grid,
+  metrics = classification_metrics
+)
+```
+
+```{r}
+# Collect full-feature MLP tuning metrics and select the best ROC AUC setting.
+mlp_full_metrics <- collect_metrics(mlp_full_tune)
+
+best_mlp_full <- select_best(
+  mlp_full_tune,
+  metric = "roc_auc"
+)
+
+best_mlp_full
+
+final_mlp_full_workflow <- finalize_workflow(
+  mlp_full_workflow,
+  best_mlp_full
+)
+
+set.seed(123)
+
+final_mlp_full_fit <- fit(
+  final_mlp_full_workflow,
+  data = data11_train_cls
+)
+```
+
+
+
+## 10.2 Important-feature MLP
+```{r}
+# Define the important-feature MLP recipe using the reduced predictor set.
+mlp_selected_recipe <- recipe(qol_status ~ ., data = data11_lasso_train_cls) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors(), new_level = "Missing") %>%
+  step_novel(all_nominal_predictors(), new_level = "New") %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors())
+```
+
+```{r}
+# Combine the important-feature MLP recipe and model.
+mlp_selected_workflow <- workflow() %>%
+  add_recipe(mlp_selected_recipe) %>%
+  add_model(mlp_model)
+```
+
+```{r}
+# Create stratified folds for important-feature MLP tuning.
+set.seed(123)
+
+cv_folds_mlp_selected <- vfold_cv(
+  data11_lasso_train_cls,
+  v = 10,
+  strata = qol_status
+)
+```
+
+```{r}
+# Tune the important-feature MLP using the same grid.
+set.seed(123)
+
+mlp_selected_tune <- tune_grid(
+  mlp_selected_workflow,
+  resamples = cv_folds_mlp_selected,
+  grid = mlp_grid,
+  metrics = classification_metrics
+)
+```
+
+```{r}
+# Collect important-feature MLP tuning metrics, choose the best setting, and refit the final workflow.
+mlp_selected_metrics <- collect_metrics(mlp_selected_tune)
+
+best_mlp_selected <- select_best(
+  mlp_selected_tune,
+  metric = "roc_auc"
+)
+
+best_mlp_selected
+
+final_mlp_selected_workflow <- finalize_workflow(
+  mlp_selected_workflow,
+  best_mlp_selected
+)
+
+set.seed(123)
+
+final_mlp_selected_fit <- fit(
+  final_mlp_selected_workflow,
+  data = data11_lasso_train_cls
+)
+```
+
+
+# 11. Save training-only model-development outputs
+
+This section saves the fitted models, selected hyperparameters, training-set CV summaries and the training-CV model ranking used by later scripts. Held-out test-set prediction and evaluation are performed in `09_heldout_test_evaluation.Rmd`.
+
+
+```{r}
+# Summarise all six important-feature models for the exploratory model selection.
+# These CV summaries are derived from training-set cross-validation, not from the test set.
+extract_best_cv_discrimination <- function(metrics_df, best_params, model_id, model_label) {
+  param_cols <- intersect(names(best_params), names(metrics_df))
+  param_cols <- setdiff(
+    param_cols,
+    c(".metric", ".estimator", "mean", "n", "std_err", ".config")
+  )
+  
+  metrics_df %>%
+    semi_join(best_params, by = param_cols) %>%
+    filter(.metric %in% c("roc_auc", "pr_auc")) %>%
+    transmute(
+      model_id = model_id,
+      model = model_label,
+      .metric = .metric,
+      cv_mean = mean,
+      cv_std_err = std_err
+    )
+}
+
+important_model_cv_metrics_all6 <- bind_rows(
+  extract_best_cv_discrimination(
+    metrics_df = lasso_selected_metrics,
+    best_params = best_lasso_selected,
+    model_id = "lasso_logistic_selected",
+    model_label = "Important-feature LASSO logistic regression (15)"
+  ),
+  extract_best_cv_discrimination(
+    metrics_df = rf_selected_metrics,
+    best_params = best_rf_selected,
+    model_id = "rf_selected",
+    model_label = "Important-feature Random Forest (15)"
+  ),
+  extract_best_cv_discrimination(
+    metrics_df = xgb_selected_metrics,
+    best_params = best_xgb_selected,
+    model_id = "xgb_selected",
+    model_label = "Important-feature XGBoost (15)"
+  ),
+  tibble(
+    model_id = "catboost_selected",
+    model = "Important-feature CatBoost (15)",
+    .metric = c("roc_auc", "pr_auc"),
+    cv_mean = c(
+      cat_selected_tune$best_params$roc_auc,
+      cat_selected_tune$best_params$pr_auc
+    ),
+    cv_std_err = NA_real_
+  ),
+  extract_best_cv_discrimination(
+    metrics_df = lgbm_selected_result$tuning_metrics,
+    best_params = lgbm_selected_result$best_params,
+    model_id = "lightgbm_selected",
+    model_label = "Important-feature LightGBM (15)"
+  ),
+  extract_best_cv_discrimination(
+    metrics_df = mlp_selected_metrics,
+    best_params = best_mlp_selected,
+    model_id = "mlp_selected",
+    model_label = "Important-feature MLP (15)"
+  )
+)
+
+important_model_cv_metrics_all6
+
+important_model_cv_ranking <- important_model_cv_metrics_all6 %>%
+  select(model_id, model, .metric, cv_mean) %>%
+  pivot_wider(
+    names_from = .metric,
+    values_from = cv_mean,
+    names_prefix = "cv_"
+  ) %>%
+  arrange(
+    desc(cv_roc_auc),
+    desc(cv_pr_auc),
+    model
+  )
+
+important_model_cv_ranking
+
+selected_exploratory_model <- important_model_cv_ranking %>%
+  slice_head(n = 1)
+
+training_cv_best_important_model <- selected_exploratory_model
+
+message(
+  "Training-CV selected important-feature model: ",
+  training_cv_best_important_model$model[[1]]
+)
+
+selected_exploratory_model
+```
+
+```{r}
+# Save the training-CV ranking used to define the exploratory model in script 10.
+model_selection_by_cv <- list(
+  ranking = important_model_cv_ranking,
+  selected_model = selected_exploratory_model
+)
+
+saveRDS(
+  model_selection_by_cv,
+  file.path(processed_path, "08_exploratory_model_selected_by_cv.rds")
+)
+
+write_xlsx(
+  list(
+    cv_metrics_all6 = important_model_cv_metrics_all6,
+    cv_ranking = important_model_cv_ranking,
+    selected_model = selected_exploratory_model,
+    best_model_cv = training_cv_best_important_model
+  ),
+  file.path(
+    output_path,
+    "08_exploratory_model_selection_cv.xlsx"
+  )
+)
+```
+
+```{r}
+# Save fitted models and training-only objects needed by scripts 09-11.
+cat_full_model_file <- file.path(
+  processed_path,
+  "08_final_catboost_full_feature.cbm"
+)
+
+cat_selected_model_file <- file.path(
+  processed_path,
+  "08_final_catboost_important_feature.cbm"
+)
+
+catboost.save_model(
+  final_cat_full_fit,
+  cat_full_model_file
+)
+
+catboost.save_model(
+  final_cat_selected_fit,
+  cat_selected_model_file
+)
+
+final_model_bundle <- list(
+  split_ids = split_ids,
+  full_feature_names = candidate_features,
+  selected_main_features = selected_main_features,
+  full_feature = list(
+    lasso = final_lasso_fit,
+    random_forest = final_rf_fit,
+    xgboost = final_xgb_fit,
+    catboost_model_file = cat_full_model_file,
+    lightgbm = lgbm_full_result$fit,
+    mlp = final_mlp_full_fit
+  ),
+  important_feature = list(
+    lasso = final_lasso_selected_fit,
+    random_forest = final_rf_selected_fit,
+    xgboost = final_xgb_selected_fit,
+    catboost_model_file = cat_selected_model_file,
+    lightgbm = lgbm_selected_result$fit,
+    mlp = final_mlp_selected_fit
+  ),
+  continuous_lasso = final_lasso_lm_fit,
+  best_params = list(
+    full_feature = list(
+      lasso = best_lambda,
+      random_forest = best_rf,
+      xgboost = best_xgb,
+      catboost = cat_full_tune$best_params,
+      lightgbm = lgbm_full_result$best_params,
+      mlp = best_mlp_full
+    ),
+    important_feature = list(
+      lasso = best_lasso_selected,
+      random_forest = best_rf_selected,
+      xgboost = best_xgb_selected,
+      catboost = cat_selected_tune$best_params,
+      lightgbm = lgbm_selected_result$best_params,
+      mlp = best_mlp_selected
+    ),
+    continuous_lasso = best_lambda_lm
+  ),
+  cv_metrics = list(
+    full_feature = list(
+      lasso = lasso_metrics,
+      random_forest = rf_metrics,
+      xgboost = xgb_metrics,
+      catboost = cat_full_tune$tuning_results,
+      lightgbm = lgbm_full_result$tuning_metrics,
+      mlp = mlp_full_metrics
+    ),
+    important_feature = list(
+      lasso = lasso_selected_metrics,
+      random_forest = rf_selected_metrics,
+      xgboost = xgb_selected_metrics,
+      catboost = cat_selected_tune$tuning_results,
+      lightgbm = lgbm_selected_result$tuning_metrics,
+      mlp = mlp_selected_metrics
+    ),
+    continuous_lasso = lasso_lm_metrics,
+    important_model_cv_metrics_all6 = important_model_cv_metrics_all6,
+    important_model_cv_ranking = important_model_cv_ranking
+  )
+)
+
+saveRDS(
+  final_model_bundle,
+  file.path(processed_path, "08_final_model_bundle.rds")
+)
+
+saveRDS(
+  important_model_cv_metrics_all6,
+  file.path(processed_path, "08_important_model_cv_metrics_all6.rds")
+)
+```

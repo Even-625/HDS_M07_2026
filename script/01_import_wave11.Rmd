@@ -1,0 +1,105 @@
+---
+title: "01 Import Wave 11"
+author: "Yiwen Xiang"
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 01 Import Wave 11
+
+This script imports the Wave 11 raw data files and saves the processed dataset list and dataset summary.
+Later scripts read the saved RDS files rather than importing the raw tables again.
+
+## Load shared settings
+
+```{r}
+source(here::here("script", "00_packages.R"))
+```
+
+## List dictionary files
+
+```{r}
+dict_files <- tibble::tribble(
+  ~table, ~file_name,
+  "w11_main", "5050_wave_11_elsa_data_eul_data_dictionary.xlsx",
+  "w11_ifs", "5050_wave_11_ifs_derived_variables_ukda_data_dictionary.xlsx",
+  "w11_financial", "5050_wave_11_financial_derived_variables_ukda_data_dictionary.xlsx",
+  "w11_nurse", "5050_wave_11_elsa_nurse_data_eul_data_dictionary.xlsx",
+  "w11_pensiongrid", "5050_wave_11_elsa_pensiongrid_eul_data_dictionary.xlsx",
+  "w11_lifehistory", "5050_wave_11_elsa_lifehistory02_data_dictionary.xlsx",
+  "w11_eol", "5050_w11_elsa_eol_data_dictionary.xlsx"
+)
+```
+
+## List raw data files
+
+```{r}
+wave11_files <- tibble::tribble(
+  ~table, ~file_name,
+  "w11_main", "wave_11_elsa_data_eul.tab",
+  "w11_ifs", "wave_11_ifs_derived_variables.tab",
+  "w11_financial", "wave_11_financial_derived_variables.tab",
+  "w11_nurse", "wave_11_elsa_nurse_data_eul.tab",
+  "w11_pensiongrid", "wave_11_elsa_pensiongrid_eul.tab",
+  "w11_lifehistory", "wave_11_elsa_lifehistory02_data_eul.tab",
+  "w11_eol", "wave_11_elsa_eol_eul.tab"
+)
+```
+
+## Import Wave 11 tables
+
+```{r}
+# Keep the imported tables in a named list for consistent downstream access.
+w11_datasets <- setNames(
+  lapply(wave11_files$file_name, function(file_name) {
+    readr::read_tsv(
+      file.path(wave11_path, file_name),
+      show_col_types = FALSE
+    )
+  }),
+  wave11_files$table
+)
+
+data11_main <- w11_datasets$w11_main
+data11_ifs <- w11_datasets$w11_ifs
+data11_financial <- w11_datasets$w11_financial
+data11_nurse <- w11_datasets$w11_nurse
+data11_pensiongrid <- w11_datasets$w11_pensiongrid
+data11_lifehistory <- w11_datasets$w11_lifehistory
+data11_eol <- w11_datasets$w11_eol
+```
+
+## Check imported table sizes
+
+```{r}
+dataset_summary <- data.frame(
+  dataset = names(w11_datasets),
+  n_rows = sapply(w11_datasets, nrow),
+  n_cols = sapply(w11_datasets, ncol),
+  stringsAsFactors = FALSE
+)
+
+dataset_summary
+```
+
+## Save imported objects
+
+```{r}
+saveRDS(
+  w11_datasets,
+  file.path(processed_path, "01_wave11_datasets.rds")
+)
+
+saveRDS(
+  dataset_summary,
+  file.path(processed_path, "01_wave11_dataset_summary.rds")
+)
+
+message("Wave 11 datasets have been imported successfully.")
+message("Saved: data/processed/01_wave11_datasets.rds")
+message("Saved: data/processed/01_wave11_dataset_summary.rds")
+```
+

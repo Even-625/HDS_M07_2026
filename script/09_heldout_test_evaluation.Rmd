@@ -1,0 +1,620 @@
+---
+title: "09_heldout_test_evaluation"
+author: "Yiwen Xiang"
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 09 Held-out test evaluation
+
+This script evaluates the fixed models developed in `08_model_development_training_only.Rmd` on the held-out test set. No hyperparameters, predictors, class weights or classification thresholds are selected in this script.
+
+```{r}
+source(here::here("script", "00_packages.R"))
+```
+
+```{r}
+data11_training <- readRDS(
+  file.path(processed_path, "07_wave11_ml_data.rds")
+)
+
+model_bundle <- readRDS(
+  file.path(processed_path, "08_final_model_bundle.rds")
+)
+
+split_ids <- readRDS(
+  file.path(processed_path, "08_train_test_split_ids.rds")
+)
+
+id_vars <- c("idauniq", "idahhw11", "perid")
+full_feature_names <- model_bundle$full_feature_names
+selected_main_features <- model_bundle$selected_main_features
+
+stopifnot(
+  length(full_feature_names) == 42L,
+  !anyDuplicated(full_feature_names),
+  all(full_feature_names %in% names(data11_training)),
+  all(selected_main_features %in% names(data11_training)),
+  identical(model_bundle$split_ids$train_idauniq, split_ids$train_idauniq),
+  identical(model_bundle$split_ids$test_idauniq, split_ids$test_idauniq)
+)
+```
+
+```{r}
+# Reconstruct the same train-test split generated in script 08.
+split_train_ids <- split_ids$train_idauniq
+split_test_ids <- split_ids$test_idauniq
+
+stopifnot(!anyDuplicated(data11_training$idauniq))
+
+train_position <- match(
+  split_train_ids,
+  data11_training$idauniq
+)
+
+test_position <- match(
+  split_test_ids,
+  data11_training$idauniq
+)
+
+if (anyNA(train_position) || anyNA(test_position)) {
+  stop("Some split IDs were not found in the Wave 11 modelling dataset.")
+}
+
+data11_train <- data11_training[
+  train_position,
+  ,
+  drop = FALSE
+]
+
+data11_test <- data11_training[
+  test_position,
+  ,
+  drop = FALSE
+]
+
+train_ids <- data11_train$idauniq
+test_ids <- data11_test$idauniq
+
+stopifnot(nrow(data11_train) == length(split_train_ids))
+stopifnot(nrow(data11_test) == length(split_test_ids))
+stopifnot(identical(data11_train$idauniq, split_train_ids))
+stopifnot(identical(data11_test$idauniq, split_test_ids))
+stopifnot(length(intersect(data11_train$idauniq, data11_test$idauniq)) == 0)
+```
+
+# 1. Prepare test-set inputs
+
+```{r}
+standardise_qol_outcome <- function(data) {
+  data %>%
+    mutate(
+      qol_status = case_when(
+        as.character(qol_status) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+        as.character(qol_status) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+        TRUE ~ as.character(qol_status)
+      ),
+      qol_status = factor(qol_status, levels = c("Low_QoL", "Non_low_QoL")),
+      across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+    )
+}
+```
+
+```{r}
+data11_train_cls <- data11_train %>%
+  select(
+    qol_status,
+    all_of(full_feature_names)
+  ) %>%
+  standardise_qol_outcome()
+
+data11_test_cls <- data11_test %>%
+  select(
+    qol_status,
+    all_of(full_feature_names)
+  ) %>%
+  standardise_qol_outcome()
+
+data11_selected_train <- data11_train %>%
+  select(
+    casp19_total,
+    qol_status,
+    all_of(selected_main_features)
+  )
+
+data11_selected_test <- data11_test %>%
+  select(
+    casp19_total,
+    qol_status,
+    all_of(selected_main_features)
+  )
+
+data11_selected_train_cls <- data11_selected_train %>%
+  standardise_qol_outcome() %>%
+  select(
+    -casp19_total
+  )
+
+data11_selected_test_cls <- data11_selected_test %>%
+  standardise_qol_outcome() %>%
+  select(
+    -casp19_total
+  )
+```
+
+# 2. Evaluation helpers
+
+```{r}
+make_class_from_probability <- function(prob, threshold = 0.50) {
+  factor(
+    if_else(
+      prob >= threshold,
+      "Low_QoL",
+      "Non_low_QoL"
+    ),
+    levels = c("Low_QoL", "Non_low_QoL")
+  )
+}
+
+calculate_classification_metrics <- function(pred_df, model_label) {
+  bind_rows(
+    pred_df %>%
+      roc_auc(truth = qol_status, .pred_Low_QoL, event_level = "first"),
+    pred_df %>%
+      pr_auc(truth = qol_status, .pred_Low_QoL, event_level = "first"),
+    pred_df %>%
+      accuracy(truth = qol_status, estimate = .pred_class),
+    pred_df %>%
+      precision(truth = qol_status, estimate = .pred_class, event_level = "first"),
+    pred_df %>%
+      sens(truth = qol_status, estimate = .pred_class, event_level = "first"),
+    pred_df %>%
+      spec(truth = qol_status, estimate = .pred_class, event_level = "first"),
+    pred_df %>%
+      f_meas(truth = qol_status, estimate = .pred_class, event_level = "first")
+  ) %>%
+    mutate(model = model_label) %>%
+    select(model, .metric, .estimator, .estimate)
+}
+
+evaluate_fixed_workflow <- function(
+    fitted_model,
+    test_data,
+    test_ids,
+    model_id,
+    model_label,
+    threshold = 0.50
+) {
+  prob_df <- predict(
+    fitted_model,
+    new_data = test_data,
+    type = "prob"
+  )
+  
+  pred_df <- tibble(idauniq = test_ids) %>%
+    bind_cols(prob_df) %>%
+    bind_cols(test_data %>% select(qol_status)) %>%
+    mutate(
+      .pred_class = make_class_from_probability(
+        .pred_Low_QoL,
+        threshold = threshold
+      ),
+      model_id = model_id,
+      model = model_label
+    ) %>%
+    select(
+      idauniq,
+      qol_status,
+      model_id,
+      model,
+      .pred_Low_QoL,
+      .pred_Non_low_QoL,
+      .pred_class
+    )
+  
+  list(
+    predictions = pred_df,
+    metrics = calculate_classification_metrics(pred_df, model_label),
+    confusion = pred_df %>%
+      count(model_id, model, qol_status, .pred_class, name = "n")
+  )
+}
+```
+
+```{r}
+prepare_catboost_data <- function(train_data, test_data, outcome = "qol_status") {
+  train_data <- train_data %>%
+    mutate(
+      qol_status = case_when(
+        as.character(qol_status) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+        as.character(qol_status) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+        TRUE ~ as.character(qol_status)
+      ),
+      qol_status = factor(qol_status, levels = c("Low_QoL", "Non_low_QoL"))
+    )
+  
+  test_data <- test_data %>%
+    mutate(
+      qol_status = case_when(
+        as.character(qol_status) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+        as.character(qol_status) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+        TRUE ~ as.character(qol_status)
+      ),
+      qol_status = factor(qol_status, levels = c("Low_QoL", "Non_low_QoL"))
+    )
+  
+  predictor_names <- setdiff(names(train_data), outcome)
+  numeric_predictors <- predictor_names[map_lgl(train_data[predictor_names], is.numeric)]
+  categorical_predictors <- setdiff(predictor_names, numeric_predictors)
+  
+  for (v in numeric_predictors) {
+    med_v <- median(train_data[[v]], na.rm = TRUE)
+    train_data[[v]][is.na(train_data[[v]])] <- med_v
+    test_data[[v]][is.na(test_data[[v]])] <- med_v
+  }
+  
+  for (v in categorical_predictors) {
+    train_data[[v]] <- as.factor(train_data[[v]])
+    test_data[[v]] <- as.factor(test_data[[v]])
+    
+    train_data[[v]] <- fct_na_value_to_level(train_data[[v]], level = "Missing")
+    test_data[[v]] <- fct_na_value_to_level(test_data[[v]], level = "Missing")
+    
+    train_levels <- levels(train_data[[v]])
+    
+    if (!("New" %in% train_levels)) {
+      train_levels <- c(train_levels, "New")
+    }
+    
+    test_chr <- as.character(test_data[[v]])
+    test_chr[!(test_chr %in% train_levels)] <- "New"
+    test_data[[v]] <- factor(test_chr, levels = train_levels)
+    train_data[[v]] <- factor(as.character(train_data[[v]]), levels = train_levels)
+  }
+  
+  list(
+    train = train_data,
+    test = test_data
+  )
+}
+
+get_catboost_probability <- function(model, pool) {
+  prob <- catboost.predict(
+    model,
+    pool,
+    prediction_type = "Probability"
+  )
+  
+  as.numeric(prob)
+}
+
+evaluate_fixed_catboost <- function(
+    fitted_model,
+    train_raw,
+    test_raw,
+    test_ids,
+    model_id,
+    model_label,
+    threshold = 0.50
+) {
+  cat_data <- prepare_catboost_data(
+    train_data = train_raw,
+    test_data = test_raw,
+    outcome = "qol_status"
+  )
+  
+  cat_test <- cat_data$test
+  cat_test_pool <- catboost.load_pool(
+    data = cat_test %>% select(-qol_status)
+  )
+  
+  pred_prob <- get_catboost_probability(
+    fitted_model,
+    cat_test_pool
+  )
+  
+  pred_df <- tibble(
+    idauniq = test_ids,
+    qol_status = cat_test$qol_status,
+    model_id = model_id,
+    model = model_label,
+    .pred_Low_QoL = pred_prob,
+    .pred_Non_low_QoL = 1 - pred_prob
+  ) %>%
+    mutate(
+      .pred_class = make_class_from_probability(
+        .pred_Low_QoL,
+        threshold = threshold
+      )
+    )
+  
+  list(
+    predictions = pred_df,
+    metrics = calculate_classification_metrics(pred_df, model_label),
+    confusion = pred_df %>%
+      count(model_id, model, qol_status, .pred_class, name = "n")
+  )
+}
+```
+
+# 3. Evaluate fixed classification models
+
+```{r}
+cat_full_train_raw <- data11_train %>%
+  select(
+    qol_status,
+    all_of(full_feature_names)
+  ) %>%
+  mutate(
+    across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+  )
+
+cat_full_test_raw <- data11_test %>%
+  select(
+    qol_status,
+    all_of(full_feature_names)
+  ) %>%
+  mutate(
+    across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+  )
+
+cat_selected_train_raw <- data11_selected_train %>%
+  mutate(across(where(is.ordered), ~ factor(.x, ordered = FALSE))) %>%
+  select(
+    -casp19_total
+  )
+
+cat_selected_test_raw <- data11_selected_test %>%
+  mutate(across(where(is.ordered), ~ factor(.x, ordered = FALSE))) %>%
+  select(
+    -casp19_total
+  )
+
+stopifnot(
+  file.exists(model_bundle$full_feature$catboost_model_file),
+  file.exists(model_bundle$important_feature$catboost_model_file)
+)
+
+cat_full_model <- catboost.load_model(
+  model_bundle$full_feature$catboost_model_file
+)
+
+cat_selected_model <- catboost.load_model(
+  model_bundle$important_feature$catboost_model_file
+)
+```
+
+```{r}
+full_feature_evaluations <- list(
+  lasso = evaluate_fixed_workflow(
+    fitted_model = model_bundle$full_feature$lasso,
+    test_data = data11_test_cls,
+    test_ids = test_ids,
+    model_id = "lasso_logistic_full",
+    model_label = "Full-feature LASSO logistic regression (42)"
+  ),
+  random_forest = evaluate_fixed_workflow(
+    fitted_model = model_bundle$full_feature$random_forest,
+    test_data = data11_test_cls,
+    test_ids = test_ids,
+    model_id = "rf_full",
+    model_label = "Full-feature Random Forest (42)"
+  ),
+  xgboost = evaluate_fixed_workflow(
+    fitted_model = model_bundle$full_feature$xgboost,
+    test_data = data11_test_cls,
+    test_ids = test_ids,
+    model_id = "xgb_full",
+    model_label = "Full-feature XGBoost (42)"
+  ),
+  catboost = evaluate_fixed_catboost(
+    fitted_model = cat_full_model,
+    train_raw = cat_full_train_raw,
+    test_raw = cat_full_test_raw,
+    test_ids = test_ids,
+    model_id = "catboost_full",
+    model_label = "Full-feature CatBoost (42)"
+  ),
+  lightgbm = evaluate_fixed_workflow(
+    fitted_model = model_bundle$full_feature$lightgbm,
+    test_data = data11_test_cls,
+    test_ids = test_ids,
+    model_id = "lightgbm_full",
+    model_label = "Full-feature LightGBM (42)"
+  ),
+  mlp = evaluate_fixed_workflow(
+    fitted_model = model_bundle$full_feature$mlp,
+    test_data = data11_test_cls,
+    test_ids = test_ids,
+    model_id = "mlp_full",
+    model_label = "Full-feature MLP (42)"
+  )
+)
+```
+
+```{r}
+important_feature_evaluations <- list(
+  lasso = evaluate_fixed_workflow(
+    fitted_model = model_bundle$important_feature$lasso,
+    test_data = data11_selected_test_cls,
+    test_ids = test_ids,
+    model_id = "lasso_logistic_selected",
+    model_label = "Important-feature LASSO logistic regression (15)"
+  ),
+  random_forest = evaluate_fixed_workflow(
+    fitted_model = model_bundle$important_feature$random_forest,
+    test_data = data11_selected_test_cls,
+    test_ids = test_ids,
+    model_id = "rf_selected",
+    model_label = "Important-feature Random Forest (15)"
+  ),
+  xgboost = evaluate_fixed_workflow(
+    fitted_model = model_bundle$important_feature$xgboost,
+    test_data = data11_selected_test_cls,
+    test_ids = test_ids,
+    model_id = "xgb_selected",
+    model_label = "Important-feature XGBoost (15)"
+  ),
+  catboost = evaluate_fixed_catboost(
+    fitted_model = cat_selected_model,
+    train_raw = cat_selected_train_raw,
+    test_raw = cat_selected_test_raw,
+    test_ids = test_ids,
+    model_id = "catboost_selected",
+    model_label = "Important-feature CatBoost (15)"
+  ),
+  lightgbm = evaluate_fixed_workflow(
+    fitted_model = model_bundle$important_feature$lightgbm,
+    test_data = data11_selected_test_cls,
+    test_ids = test_ids,
+    model_id = "lightgbm_selected",
+    model_label = "Important-feature LightGBM (15)"
+  ),
+  mlp = evaluate_fixed_workflow(
+    fitted_model = model_bundle$important_feature$mlp,
+    test_data = data11_selected_test_cls,
+    test_ids = test_ids,
+    model_id = "mlp_selected",
+    model_label = "Important-feature MLP (15)"
+  )
+)
+```
+
+```{r}
+all_classification_evaluations <- c(
+  full_feature_evaluations,
+  important_feature_evaluations
+)
+
+final_classification_results_long <- map_dfr(
+  all_classification_evaluations,
+  "metrics"
+)
+
+final_classification_results_wide <- final_classification_results_long %>%
+  mutate(
+    .metric = case_when(
+      .metric == "roc_auc" ~ "ROC_AUC",
+      .metric == "pr_auc" ~ "PR_AUC",
+      .metric == "accuracy" ~ "Accuracy",
+      .metric == "precision" ~ "Precision",
+      .metric == "sens" ~ "Sensitivity/Recall",
+      .metric == "spec" ~ "Specificity",
+      .metric == "f_meas" ~ "F1",
+      TRUE ~ .metric
+    ),
+    .estimate = round(.estimate, 3)
+  ) %>%
+  select(model, .metric, .estimate) %>%
+  pivot_wider(
+    names_from = .metric,
+    values_from = .estimate
+  )
+
+final_classification_results_wide
+```
+
+```{r}
+classification_confusion_tables <- map_dfr(
+  all_classification_evaluations,
+  "confusion"
+)
+
+classification_test_predictions_all12 <- map_dfr(
+  all_classification_evaluations,
+  "predictions"
+)
+
+important_model_test_predictions_all6 <- map_dfr(
+  important_feature_evaluations,
+  "predictions"
+)
+
+important_prediction_coverage <- important_model_test_predictions_all6 %>%
+  count(idauniq)
+
+all_model_prediction_coverage <- classification_test_predictions_all12 %>%
+  count(idauniq)
+
+stopifnot(
+  n_distinct(important_model_test_predictions_all6$model_id) == 6,
+  nrow(important_prediction_coverage) == length(test_ids),
+  all(important_prediction_coverage$n == 6),
+  n_distinct(classification_test_predictions_all12$model_id) == 12,
+  nrow(all_model_prediction_coverage) == length(test_ids),
+  all(all_model_prediction_coverage$n == 12),
+  !anyNA(classification_test_predictions_all12$.pred_Low_QoL),
+  all(
+    classification_test_predictions_all12$.pred_Low_QoL >= 0 &
+      classification_test_predictions_all12$.pred_Low_QoL <= 1
+  ),
+  all(
+    abs(
+      classification_test_predictions_all12$.pred_Low_QoL +
+        classification_test_predictions_all12$.pred_Non_low_QoL -
+        1
+    ) < 1e-6
+  )
+)
+```
+
+# 4. Continuous LASSO test-set evaluation
+
+```{r}
+data11_test_lm <- data11_test %>%
+  select(
+    casp19_total,
+    all_of(full_feature_names)
+  ) %>%
+  mutate(
+    across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+  )
+
+continuous_lasso_test_predictions <- predict(
+  model_bundle$continuous_lasso,
+  new_data = data11_test_lm
+) %>%
+  bind_cols(
+    data11_test_lm %>% select(casp19_total)
+  )
+
+continuous_lasso_test_metrics <- bind_rows(
+  continuous_lasso_test_predictions %>%
+    rmse(truth = casp19_total, estimate = .pred),
+  continuous_lasso_test_predictions %>%
+    mae(truth = casp19_total, estimate = .pred),
+  continuous_lasso_test_predictions %>%
+    rsq(truth = casp19_total, estimate = .pred)
+) %>%
+  mutate(model = "Full-feature LASSO linear regression") %>%
+  select(model, .metric, .estimator, .estimate)
+
+continuous_lasso_test_metrics
+```
+
+# 5. Export held-out test results
+
+```{r}
+saveRDS(
+  classification_test_predictions_all12,
+  file.path(processed_path, "09_model_test_predictions_all12.rds")
+)
+
+saveRDS(
+  important_model_test_predictions_all6,
+  file.path(processed_path, "09_important_model_test_predictions_all6.rds")
+)
+
+write_xlsx(
+  list(
+    classification_performance = final_classification_results_wide,
+    classification_performance_long = final_classification_results_long,
+    confusion_tables = classification_confusion_tables,
+    continuous_lasso_metrics = continuous_lasso_test_metrics
+  ),
+  file.path(output_path, "09_heldout_test_model_performance.xlsx")
+)
+```

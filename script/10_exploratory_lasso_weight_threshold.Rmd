@@ -1,0 +1,566 @@
+---
+title: "10_exploratory_lasso_weight_threshold"
+author: "Yiwen Xiang"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    number_sections: true
+---
+
+This file conducts an exploratory threshold and class-weight sensitivity analysis for the important-feature LASSO logistic regression model. It uses the same analytical dataset, train-test split, and 15-feature predictor set as `08_model_development_training_only.Rmd`, then compares alternative class weights and classification thresholds for the Low_QoL positive class.
+
+The purpose is not to re-select features or compare all models again. The model type is read from the training-set CV ranking saved by script 08. The class weight, penalty, and classification threshold are selected using training-set cross-validation only. The resulting operating point is fixed before it is applied to the test set in this exploratory analysis.
+
+# 1. Setup
+
+```{r, include=FALSE}
+source(here::here("script", "00_packages.R"))
+
+set.seed(123)
+options(yardstick.event_first = TRUE)
+```
+
+```{r}
+data11_training <- readRDS(
+  file.path(processed_path, "07_wave11_ml_data.rds")
+)
+
+main_features <- readRDS(
+  file.path(processed_path, "08_main_features.rds")
+)
+
+stopifnot(
+  length(main_features) == 15L,
+  !anyDuplicated(main_features),
+  all(main_features %in% names(data11_training))
+)
+
+model_selection <- readRDS(
+  file.path(processed_path, "08_exploratory_model_selected_by_cv.rds")
+)
+
+selected_exploratory_model <- model_selection$selected_model
+
+if (selected_exploratory_model$model_id[[1]] != "lasso_logistic_selected") {
+  stop(
+    paste0(
+      "The training-CV selected model is ",
+      selected_exploratory_model$model[[1]],
+      ", not LASSO logistic regression."
+    )
+  )
+}
+
+dim(data11_training)
+main_features
+selected_exploratory_model
+```
+
+# 2. Use the same train-test split as script 08
+
+The split is kept consistent with script 08 so the LASSO sensitivity results are comparable with the main model results. The saved split IDs from script 08 are reused directly.
+
+```{r}
+split_id_file <- file.path(processed_path, "08_train_test_split_ids.rds")
+
+if (!file.exists(split_id_file)) {
+  stop(
+    paste(
+      "The train-test split IDs from script 08 were not found.",
+      "Run script 08 before script 10."
+    )
+  )
+}
+
+split_ids <- readRDS(split_id_file)
+
+train_ids <- split_ids$train_idauniq
+test_ids <- split_ids$test_idauniq
+
+stopifnot(!anyDuplicated(data11_training$idauniq))
+
+train_position <- match(
+  train_ids,
+  data11_training$idauniq
+)
+
+test_position <- match(
+  test_ids,
+  data11_training$idauniq
+)
+
+if (anyNA(train_position) || anyNA(test_position)) {
+  stop("Some split IDs were not found in the modelling dataset.")
+}
+
+data11_train <- data11_training[
+  train_position,
+  ,
+  drop = FALSE
+]
+
+data11_test <- data11_training[
+  test_position,
+  ,
+  drop = FALSE
+]
+
+stopifnot(
+  identical(data11_train$idauniq, train_ids),
+  identical(data11_test$idauniq, test_ids)
+)
+
+dim(data11_train)
+dim(data11_test)
+```
+
+```{r}
+data11_train %>%
+  count(qol_status) %>%
+  mutate(percent = round(n / sum(n) * 100, 2))
+
+data11_test %>%
+  count(qol_status) %>%
+  mutate(percent = round(n / sum(n) * 100, 2))
+```
+
+# 3. Helper functions
+
+## 3.1 Standardise outcome
+
+`standardise_qol_outcome()` keeps the outcome coding consistent across scripts. `Low_QoL` is set as the first factor level so that ROC-AUC, PR-AUC, sensitivity, precision, and F1 treat it as the positive class.
+
+```{r}
+standardise_qol_outcome <- function(data) {
+  data %>%
+    mutate(
+      qol_status = case_when(
+        as.character(qol_status) %in% c("Low QoL", "Low_QoL") ~ "Low_QoL",
+        as.character(qol_status) %in% c("Non-low QoL", "Non_low_QoL") ~ "Non_low_QoL",
+        TRUE ~ as.character(qol_status)
+      ),
+      qol_status = factor(qol_status, levels = c("Low_QoL", "Non_low_QoL")),
+      across(where(is.ordered), ~ factor(.x, ordered = FALSE))
+    )
+}
+```
+
+## 3.2 Evaluate one threshold on the test set
+
+`evaluate_binary_predictions()` calculates performance after converting predicted Low_QoL probabilities into classes using one fixed threshold.
+
+```{r}
+evaluate_binary_predictions <- function(pred_df, model_name, strategy, weight, threshold) {
+  pred_df <- pred_df %>%
+    mutate(
+      .pred_class = factor(
+        if_else(.pred_Low_QoL >= threshold, "Low_QoL", "Non_low_QoL"),
+        levels = c("Low_QoL", "Non_low_QoL")
+      )
+    )
+  
+  bind_rows(
+    pred_df %>%
+      roc_auc(truth = qol_status, .pred_Low_QoL, event_level = "first"),
+    
+    pred_df %>%
+      pr_auc(truth = qol_status, .pred_Low_QoL, event_level = "first"),
+    
+    pred_df %>%
+      accuracy(truth = qol_status, estimate = .pred_class),
+    
+    pred_df %>%
+      precision(truth = qol_status, estimate = .pred_class, event_level = "first"),
+    
+    pred_df %>%
+      sens(truth = qol_status, estimate = .pred_class, event_level = "first"),
+    
+    pred_df %>%
+      spec(truth = qol_status, estimate = .pred_class, event_level = "first"),
+    
+    pred_df %>%
+      f_meas(truth = qol_status, estimate = .pred_class, event_level = "first")
+  ) %>%
+    mutate(
+      model = model_name,
+      strategy = strategy,
+      class_weight = weight,
+      threshold = round(threshold, 3),
+      .estimate = round(.estimate, 3)
+    ) %>%
+    select(model, strategy, class_weight, threshold, .metric, .estimator, .estimate)
+}
+```
+
+## 3.3 Evaluate thresholds from CV predictions
+
+`make_threshold_table()` evaluates a grid of thresholds using cross-validated training predictions. The test set is not used to choose thresholds.
+
+```{r}
+make_threshold_table <- function(pred_df) {
+  threshold_grid <- seq(0.05, 0.95, by = 0.01)
+  
+  map_dfr(
+    threshold_grid,
+    function(threshold_i) {
+      class_df <- pred_df %>%
+        mutate(
+          .pred_class = factor(
+            if_else(
+              .pred_Low_QoL >= threshold_i,
+              "Low_QoL",
+              "Non_low_QoL"
+            ),
+            levels = c("Low_QoL", "Non_low_QoL")
+          )
+        )
+      
+      tibble(
+        threshold = threshold_i,
+        sensitivity = sens(
+          class_df,
+          truth = qol_status,
+          estimate = .pred_class,
+          event_level = "first"
+        )$.estimate,
+        specificity = spec(
+          class_df,
+          truth = qol_status,
+          estimate = .pred_class,
+          event_level = "first"
+        )$.estimate,
+        precision = precision(
+          class_df,
+          truth = qol_status,
+          estimate = .pred_class,
+          event_level = "first"
+        )$.estimate,
+        f1 = f_meas(
+          class_df,
+          truth = qol_status,
+          estimate = .pred_class,
+          event_level = "first"
+        )$.estimate
+      )
+    }
+  )
+}
+```
+
+# 4. Prepare the 15-feature LASSO data
+
+This script uses the 15 main features saved by script 08, so the model checked here is the important-feature LASSO logistic regression model.
+
+```{r}
+selected_main_features <- main_features
+
+data11_selected <- data11_training %>%
+  select(
+    idauniq,
+    casp19_total,
+    qol_status,
+    all_of(selected_main_features)
+  )
+
+data11_selected_train_cls <- data11_selected %>%
+  filter(idauniq %in% data11_train$idauniq) %>%
+  standardise_qol_outcome() %>%
+  select(
+    -idauniq,
+    -casp19_total
+  )
+
+data11_selected_test_cls <- data11_selected %>%
+  filter(idauniq %in% data11_test$idauniq) %>%
+  standardise_qol_outcome() %>%
+  select(
+    -idauniq,
+    -casp19_total
+  )
+
+dim(data11_selected_train_cls)
+dim(data11_selected_test_cls)
+```
+
+# 5. Class-weight candidates
+
+Low_QoL case weights are applied as individual case weights. A weight of 1 represents no additional weighting. The prevalence-based weight is calculated as the ratio of Non_low_QoL to Low_QoL participants in the training set.
+
+```{r}
+train_class_counts <- data11_selected_train_cls %>%
+  count(qol_status)
+
+prevalence_weight <- train_class_counts %>%
+  summarise(
+    weight = n[qol_status == "Non_low_QoL"] / n[qol_status == "Low_QoL"]
+  ) %>%
+  pull(weight)
+
+weight_grid <- sort(unique(c(1, 2, round(prevalence_weight, 2), 3, 4)))
+
+train_class_counts
+prevalence_weight
+weight_grid
+```
+
+# 6. Run LASSO threshold and weight sensitivity checks
+
+For each candidate class weight, `run_lasso_weight_experiment()` retunes the LASSO penalty using stratified 10-fold cross-validation and then estimates threshold performance from the out-of-fold training predictions.
+
+```{r}
+classification_metrics <- metric_set(
+  roc_auc,
+  pr_auc,
+  accuracy,
+  precision,
+  sens,
+  spec,
+  f_meas
+)
+
+lasso_model <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = 1
+) %>%
+  set_engine("glmnet")
+
+lasso_grid <- grid_regular(
+  penalty(range = c(-5, 0)),
+  levels = 50
+)
+
+run_lasso_weight_experiment <- function(class_weight) {
+  weighted_train_data <- data11_selected_train_cls %>%
+    mutate(
+      case_weight = hardhat::importance_weights(
+        if_else(
+          qol_status == "Low_QoL",
+          class_weight,
+          1
+        )
+      )
+    )
+  
+  lasso_recipe_i <- recipe(qol_status ~ ., data = weighted_train_data) %>%
+    step_impute_median(all_numeric_predictors()) %>%
+    step_unknown(all_nominal_predictors(), new_level = "Missing") %>%
+    step_novel(all_nominal_predictors(), new_level = "New") %>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_zv(all_predictors()) %>%
+    step_normalize(all_numeric_predictors())
+  
+  set.seed(123)
+  
+  weighted_cv_folds <- vfold_cv(
+    weighted_train_data,
+    v = 10,
+    strata = qol_status
+  )
+  
+  lasso_workflow <- workflow() %>%
+    add_case_weights(case_weight) %>%
+    add_recipe(lasso_recipe_i) %>%
+    add_model(lasso_model)
+  
+  set.seed(123)
+  
+  lasso_tune <- tune_grid(
+    lasso_workflow,
+    resamples = weighted_cv_folds,
+    grid = lasso_grid,
+    metrics = classification_metrics,
+    control = control_grid(save_pred = TRUE)
+  )
+  
+  selected_penalty <- select_best(
+    lasso_tune,
+    metric = "roc_auc"
+  )
+  
+  oof_predictions <- collect_predictions(
+    lasso_tune,
+    parameters = selected_penalty
+  ) %>%
+    select(qol_status, .pred_Low_QoL, .pred_Non_low_QoL)
+  
+  threshold_results <- make_threshold_table(oof_predictions)
+  
+  list(
+    class_weight = class_weight,
+    workflow = lasso_workflow,
+    selected_penalty = selected_penalty,
+    
+    tuning_results = collect_metrics(lasso_tune) %>%
+      mutate(model = "Important-feature LASSO logistic regression (15)", class_weight = class_weight),
+    
+    threshold_grid = threshold_results %>%
+      mutate(
+        model = "Important-feature LASSO logistic regression (15)",
+        class_weight = class_weight,
+        penalty = selected_penalty$penalty[[1]]
+      )
+  )
+}
+```
+
+```{r}
+set.seed(123)
+
+lasso_cv_list <- map(
+  weight_grid,
+  run_lasso_weight_experiment
+)
+
+lasso_tuning_results <- map_dfr(lasso_cv_list, "tuning_results")
+lasso_threshold_grid <- map_dfr(lasso_cv_list, "threshold_grid")
+
+default_threshold_results_across_weights <- lasso_threshold_grid %>%
+  filter(abs(threshold - 0.50) < 1e-8)
+
+default_threshold_results_across_weights
+```
+
+# 7. Select one operating point using training CV
+
+The class weight, penalty, and classification threshold are selected using training-set cross-validation only. The pre-specified rule is to retain thresholds with sensitivity of at least 0.70 in cross-validation, then select the combination with the highest F1-score. Precision and specificity are used only to break ties.
+
+```{r}
+eligible_operating_points <- lasso_threshold_grid %>%
+  filter(
+    !is.na(sensitivity),
+    !is.na(f1),
+    !is.na(precision),
+    !is.na(specificity),
+    sensitivity >= 0.70
+  )
+
+if (nrow(eligible_operating_points) == 0) {
+  stop(
+    "No class-weight and threshold combination achieved CV sensitivity >= 0.70."
+  )
+}
+
+selected_operating_point <- eligible_operating_points %>%
+  arrange(
+    desc(f1),
+    desc(precision),
+    desc(specificity),
+    class_weight,
+    threshold
+  ) %>%
+  slice_head(n = 1) %>%
+  mutate(
+    strategy = "Training-CV selected: sensitivity >= 0.70 and max F1"
+  )
+
+selected_operating_point
+```
+
+```{r}
+selected_weight <- selected_operating_point$class_weight[[1]]
+selected_threshold <- selected_operating_point$threshold[[1]]
+selected_penalty <- selected_operating_point$penalty[[1]]
+
+weight_values <- map_dbl(
+  lasso_cv_list,
+  ~ .x$class_weight
+)
+
+selected_index <- which.min(
+  abs(weight_values - selected_weight)
+)
+
+selected_result <- lasso_cv_list[[selected_index]]
+
+stopifnot(
+  isTRUE(
+    all.equal(
+      selected_penalty,
+      selected_result$selected_penalty$penalty[[1]]
+    )
+  )
+)
+
+selected_weight
+selected_threshold
+selected_penalty
+selected_result$selected_penalty
+```
+
+# 8. Final model fitting and exploratory test-set evaluation
+
+```{r}
+final_weighted_train_data <- data11_selected_train_cls %>%
+  mutate(
+    case_weight = hardhat::importance_weights(
+      if_else(
+        qol_status == "Low_QoL",
+        selected_weight,
+        1
+      )
+    )
+  )
+
+final_lasso_workflow <- finalize_workflow(
+  selected_result$workflow,
+  selected_result$selected_penalty
+)
+
+set.seed(123)
+
+final_lasso_fit <- fit(
+  final_lasso_workflow,
+  data = final_weighted_train_data
+)
+
+final_test_prob <- predict(
+  final_lasso_fit,
+  new_data = data11_selected_test_cls,
+  type = "prob"
+) %>%
+  bind_cols(
+    data11_selected_test_cls %>%
+      select(qol_status)
+  )
+
+final_test_metrics <- evaluate_binary_predictions(
+  pred_df = final_test_prob,
+  model_name = "Important-feature LASSO logistic regression (15)",
+  strategy = selected_operating_point$strategy[[1]],
+  weight = selected_weight,
+  threshold = selected_threshold
+)
+
+final_test_metrics
+```
+
+# 9. Export results
+
+```{r}
+sensitivity_export_file <- file.path(
+  output_path,
+  "10_exploratory_lasso_weight_threshold_results.xlsx"
+)
+
+write_xlsx(
+  list(
+    selected_point_cv = selected_operating_point,
+    final_test_metrics = final_test_metrics,
+    default_threshold_cv = default_threshold_results_across_weights,
+    cv_threshold_grid = lasso_threshold_grid,
+    lasso_tuning = lasso_tuning_results
+  ),
+  sensitivity_export_file
+)
+
+sensitivity_export_file
+```
+
+# 10. Interpretation notes
+
+This analysis is considered exploratory because the class-weight and threshold analysis was added after reviewing the initial held-out test-set model comparison in script 09. However, the model type was selected in script 08 using training-set cross-validation only, and the class weight, penalty, and classification threshold were also determined using training-set cross-validation only. The fixed operating point was subsequently applied to the same held-out test set used in script 09. Therefore, the resulting performance is interpreted as exploratory rather than independent confirmatory validation.

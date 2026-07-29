@@ -1,0 +1,1449 @@
+---
+title: "04 Variable Matching"
+author: "Yiwen Xiang"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    number_sections: true
+---
+
+# 04 Variable Matching
+
+This file records how candidate predictors were searched and checked in the Wave 11 metadata.
+The aim is to keep the variable-selection process transparent before building the modelling dataset.
+
+## Load inputs
+
+```{r, include=FALSE}
+source(here::here("script", "00_packages.R"))
+source(here::here("script", "02_functions.R"))
+
+w11_datasets <- readRDS(file.path(processed_path, "01_wave11_datasets.rds"))
+data11_main <- w11_datasets$w11_main
+data11_ifs <- w11_datasets$w11_ifs
+data11_financial <- w11_datasets$w11_financial
+data11_nurse <- w11_datasets$w11_nurse
+data11_pensiongrid <- w11_datasets$w11_pensiongrid
+data11_lifehistory <- w11_datasets$w11_lifehistory
+data11_eol <- w11_datasets$w11_eol
+
+dataset_summary <- readRDS(file.path(processed_path, "01_wave11_dataset_summary.rds"))
+var_w11_all_labeled <- readRDS(file.path(processed_path, "03var_w11_all_labeled.rds"))
+value_dict_w11_all <- readRDS(file.path(processed_path, "03value_dict_w11_all.rds"))
+var_label_summary <- readRDS(file.path(processed_path, "03var_label_summary.rds"))
+```
+
+## Check imported data
+
+```{r}
+dataset_summary
+```
+
+```{r}
+head(var_w11_all_labeled)
+```
+
+```{r}
+var_label_summary
+```
+
+```{r}
+data11_main %>%
+  summarise(
+    n_rows = n(),
+    n_unique_id = n_distinct(idauniq),
+    n_missing_id = sum(is.na(idauniq))
+  )
+```
+
+## Demographic variables
+
+### Age
+
+```{r}
+age_search <- search_vars(
+  keywords = c("age"),
+  var_dict = var_w11_all_labeled,
+  table_name = "w11_main"
+)
+
+age_search
+```
+
+```{r}
+var_w11_all_labeled %>%
+  filter(table == "w11_main", variable == "indager") %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = "indager",
+  value_dict = value_dict_w11_all,
+  table_name = "w11_main"
+)
+```
+
+### Sex
+
+```{r}
+sex_search <- search_vars(
+  keywords = c("sex", "gender", "male", "female"),
+  var_dict = var_w11_all_labeled,
+  table_name = "w11_main"
+)
+
+sex_search
+```
+
+```{r}
+var_w11_all_labeled %>%
+  filter(table == "w11_main", variable == "indsex") %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = "indsex",
+  value_dict = value_dict_w11_all,
+  table_name = "w11_main"
+)
+```
+
+### Marital or partnership status
+
+```{r}
+marital_search <- search_vars(
+  keywords = c(
+    "marital",
+    "married",
+    "partner",
+    "spouse",
+    "cohabit",
+    "couple",
+    "husband",
+    "wife"
+  ),
+  var_dict = var_w11_all_labeled,
+  table_name = "w11_main"
+)
+
+marital_search
+```
+
+```{r}
+var_w11_all_labeled %>%
+  filter(
+    table == "w11_main",
+    variable %in% c("dimarr", "couple")
+  ) %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = c("dimarr", "couple"),
+  value_dict = value_dict_w11_all,
+  table_name = "w11_main"
+)
+```
+
+### Education level
+
+```{r}
+education_search <- search_vars(
+  keywords = c(
+    "education",
+    "qualification",
+    "degree",
+    "school",
+    "college",
+    "university",
+    "gcse",
+    "a level",
+    "nvq"
+  ),
+  var_dict = var_w11_all_labeled,
+  table_name = "w11_main"
+)
+
+education_search
+```
+
+```{r}
+var_w11_all_labeled %>%
+  filter(table == "w11_main", variable == "fqendm") %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = "fqendm",
+  value_dict = value_dict_w11_all,
+  table_name = "w11_main"
+)
+```
+
+## Socioeconomic variables
+
+### Wealth quintile
+
+```{r}
+wealth_search <- search_vars(
+  keywords = c(
+    "wealth",
+    "wealth quintile",
+    "quintile",
+    "net wealth",
+    "total wealth",
+    "non-pension wealth",
+    "pension wealth",
+    "financial wealth"
+  ),
+  var_dict = var_w11_all_labeled
+)
+
+wealth_search
+```
+
+```{r}
+var_w11_all_labeled %>%
+  filter(table == "w11_financial", variable == "totwq5_bu_s") %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = "totwq5_bu_s",
+  value_dict = value_dict_w11_all,
+  table_name = "w11_financial"
+)
+```
+
+### Employment or retirement status
+
+```{r}
+employment_search <- search_vars(
+  keywords = c(
+    "employment",
+    "employed",
+    "work",
+    "working",
+    "job",
+    "retired",
+    "retirement",
+    "economic activity",
+    "labour",
+    "self-employed"
+  ),
+  var_dict = var_w11_all_labeled,
+  table_name = "w11_main"
+)
+
+employment_search
+```
+
+```{r}
+var_w11_all_labeled %>%
+  filter(table == "w11_main", variable == "dhwork") %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = "dhwork",
+  value_dict = value_dict_w11_all,
+  table_name = "w11_main"
+)
+```
+
+### Housing tenure
+
+```{r}
+housing_search <- search_vars(
+  keywords = c(
+    "housing tenure",
+    "tenure",
+    "own home",
+    "owner",
+    "mortgage",
+    "rent",
+    "rented",
+    "housing",
+    "accommodation"
+  ),
+  var_dict = var_w11_all_labeled,
+  table_name = "w11_main"
+)
+
+housing_search
+```
+
+```{r}
+var_w11_all_labeled %>%
+  filter(table == "w11_main", variable == "hotenu") %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = "hotenu",
+  value_dict = value_dict_w11_all,
+  table_name = "w11_main"
+)
+```
+
+### Financial difficulty
+
+```{r}
+financial_difficulty_search <- search_vars(
+  keywords = c(
+    "financial difficulty",
+    "getting along financially",
+    "manage financially",
+    "financially",
+    "difficulty",
+    "afford",
+    "debt",
+    "arrears",
+    "hardship",
+    "money"
+  ),
+  var_dict = var_w11_all_labeled
+)
+
+financial_difficulty_search
+```
+
+```{r}
+var_w11_all_labeled %>%
+  filter(variable %in% c("findiff", "iafcon", "iadebt")) %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = c("findiff", "iafcon", "iadebt"),
+  value_dict = value_dict_w11_all
+)
+```
+
+## Physical health variables
+
+```{r}
+physical_tables <- intersect(
+  c("w11_main", "w11_ifs", "w11_nurse"),
+  unique(var_w11_all_labeled$table)
+)
+```
+
+### Self-rated health
+
+```{r}
+self_rated_health_search <- search_vars(
+  keywords = c(
+    "self-rated health",
+    "self rated health",
+    "general health",
+    "health in general",
+    "self reported health",
+    "excellent",
+    "very good",
+    "fair",
+    "poor"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% physical_tables)
+
+self_rated_health_search
+```
+
+### Limiting long-standing illness
+
+```{r}
+limiting_illness_search <- search_vars(
+  keywords = c(
+    "limiting long-standing illness",
+    "long-standing illness",
+    "longstanding illness",
+    "long term illness",
+    "long-term illness",
+    "illness or disability",
+    "health problem limits",
+    "limits activities",
+    "limiting illness"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% physical_tables)
+
+limiting_illness_search
+```
+
+### Pain, eyesight and hearing
+
+```{r}
+chronic_pain_search <- search_vars(
+  keywords = c(
+    "chronic pain",
+    "pain",
+    "often troubled with pain",
+    "troubled with pain",
+    "painful",
+    "aches"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% physical_tables)
+
+eyesight_search <- search_vars(
+  keywords = c(
+    "eyesight",
+    "eye sight",
+    "vision",
+    "seeing",
+    "sight",
+    "eye problem",
+    "cataract",
+    "glaucoma"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% physical_tables)
+
+hearing_search <- search_vars(
+  keywords = c(
+    "hearing",
+    "hear",
+    "deaf",
+    "hearing problem",
+    "hearing aid",
+    "difficulty hearing"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% physical_tables)
+
+physical_health_search_results <- bind_rows(
+  self_rated_health_search %>% mutate(search_topic = "self_rated_health"),
+  limiting_illness_search %>% mutate(search_topic = "limiting_longstanding_illness"),
+  chronic_pain_search %>% mutate(search_topic = "chronic_pain"),
+  eyesight_search %>% mutate(search_topic = "eyesight_problem"),
+  hearing_search %>% mutate(search_topic = "hearing_problem")
+) %>%
+  select(search_topic, table, variable, label, type, n_missing)
+
+physical_health_search_results
+```
+
+```{r}
+selected_physical_health_vars <- c(
+  "srh_hse",
+  "hehelf",
+  "llsill",
+  "hepain",
+  "hepaa",
+  "heeye",
+  "hehear"
+)
+
+var_w11_all_labeled %>%
+  filter(variable %in% selected_physical_health_vars) %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = selected_physical_health_vars,
+  value_dict = value_dict_w11_all
+)
+```
+
+## Chronic disease variables
+
+```{r}
+disease_tables <- intersect(
+  c("w11_main", "w11_ifs", "w11_nurse"),
+  unique(var_w11_all_labeled$table)
+)
+```
+
+```{r}
+arthritis_search <- search_vars(
+  keywords = c(
+    "arthritis",
+    "osteoarthritis",
+    "rheumatoid arthritis",
+    "joint disease",
+    "joint problem",
+    "joint pain",
+    "rheumatism"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% disease_tables)
+
+diabetes_search <- search_vars(
+  keywords = c(
+    "diabetes",
+    "diabetic",
+    "high blood sugar",
+    "blood sugar",
+    "insulin",
+    "glucose",
+    "doctor diagnosed diabetes"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% disease_tables)
+
+cvd_search <- search_vars(
+  keywords = c(
+    "cardiovascular disease",
+    "CVD",
+    "heart disease",
+    "heart problem",
+    "heart condition",
+    "heart attack",
+    "myocardial infarction",
+    "angina",
+    "coronary heart disease",
+    "heart failure",
+    "abnormal heart rhythm",
+    "arrhythmia",
+    "high blood pressure",
+    "hypertension"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% disease_tables)
+
+stroke_search <- search_vars(
+  keywords = c(
+    "stroke",
+    "cerebrovascular",
+    "mini stroke",
+    "TIA",
+    "transient ischemic attack",
+    "brain attack",
+    "doctor diagnosed stroke"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% disease_tables)
+
+cancer_search <- search_vars(
+  keywords = c(
+    "cancer",
+    "malignant",
+    "malignancy",
+    "tumour",
+    "tumor",
+    "carcinoma"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% disease_tables)
+
+lung_copd_search <- search_vars(
+  keywords = c(
+    "chronic lung disease",
+    "lung disease",
+    "respiratory disease",
+    "COPD",
+    "chronic obstructive pulmonary disease",
+    "chronic bronchitis",
+    "bronchitis",
+    "emphysema",
+    "asthma",
+    "breathlessness"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% disease_tables)
+
+chronic_disease_search_results <- bind_rows(
+  arthritis_search %>% mutate(search_topic = "arthritis"),
+  diabetes_search %>% mutate(search_topic = "diabetes"),
+  cvd_search %>% mutate(search_topic = "cardiovascular_disease"),
+  stroke_search %>% mutate(search_topic = "stroke"),
+  cancer_search %>% mutate(search_topic = "cancer"),
+  lung_copd_search %>% mutate(search_topic = "lung_copd_asthma")
+) %>%
+  select(search_topic, table, variable, label, type, n_missing) %>%
+  distinct(search_topic, table, variable, .keep_all = TRUE)
+
+chronic_disease_search_results
+```
+
+```{r}
+selected_chronic_disease_vars <- c(
+  "hediadar", "hedids3", "hehavear",
+  "hediaddi", "hedids12", "hehavedi",
+  "hediacah", "hediacan", "hediachf", "hediacmi", "hediacoh",
+  "hediia95", "hediiam2", "hediiam3", "hediiam4", "hediiam6",
+  "hehaveah", "hehavean", "hehavehf", "hehaveoh",
+  "hediacst", "hediiam7",
+  "hediadca", "hedids5", "hehaveca",
+  "hediadcl", "hedids1", "hehavecl",
+  "hediacbp", "hediiam1", "hehavebp",
+  "hediadad", "hediaddm", "hedids8", "hedids9", "hehavead", "hehavedm",
+  "hediadas", "hedids2", "hehaveas"
+)
+
+var_w11_all_labeled %>%
+  filter(variable %in% selected_chronic_disease_vars) %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = selected_chronic_disease_vars,
+  value_dict = value_dict_w11_all
+)
+```
+
+## Functional limitation, mental health and loneliness
+
+```{r}
+function_mental_tables <- intersect(
+  c("w11_main", "w11_ifs", "w11_nurse"),
+  unique(var_w11_all_labeled$table)
+)
+```
+
+```{r}
+adl_search <- search_vars(
+  keywords = c(
+    "ADL",
+    "activities of daily living",
+    "difficulty dressing",
+    "dressing",
+    "bathing",
+    "eating",
+    "getting in and out of bed",
+    "using the toilet",
+    "walking across a room"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% function_mental_tables)
+
+iadl_search <- search_vars(
+  keywords = c(
+    "IADL",
+    "instrumental activities of daily living",
+    "preparing a hot meal",
+    "shopping",
+    "telephone calls",
+    "taking medications",
+    "managing money",
+    "housework",
+    "gardening"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% function_mental_tables)
+
+mobility_search <- search_vars(
+  keywords = c(
+    "mobility",
+    "mobility limitation",
+    "difficulty walking",
+    "climbing stairs",
+    "stooping",
+    "kneeling",
+    "standing",
+    "getting up from a chair",
+    "lifting",
+    "carrying"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% function_mental_tables)
+
+falls_search <- search_vars(
+  keywords = c(
+    "fall",
+    "falls",
+    "fallen",
+    "fell",
+    "fear of falling",
+    "afraid of falling"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% function_mental_tables)
+
+depression_cesd_search <- search_vars(
+  keywords = c(
+    "CES-D",
+    "CESD",
+    "depressive symptoms",
+    "depression",
+    "depressed",
+    "felt sad",
+    "restless sleep",
+    "could not get going",
+    "happy",
+    "enjoyed life"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% function_mental_tables)
+
+sleep_search <- search_vars(
+  keywords = c(
+    "sleep",
+    "sleep problem",
+    "sleep problems",
+    "difficulty sleeping",
+    "trouble sleeping",
+    "restless sleep",
+    "insomnia"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% function_mental_tables)
+
+loneliness_search <- search_vars(
+  keywords = c(
+    "loneliness",
+    "lonely",
+    "UCLA",
+    "companionship",
+    "left out",
+    "isolated"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% function_mental_tables)
+
+function_mental_loneliness_search_results <- bind_rows(
+  adl_search %>% mutate(search_topic = "adl_count"),
+  iadl_search %>% mutate(search_topic = "iadl_count"),
+  mobility_search %>% mutate(search_topic = "mobility_limitation_count"),
+  falls_search %>% mutate(search_topic = "falls_fear_of_falling"),
+  depression_cesd_search %>% mutate(search_topic = "depressive_symptoms_cesd"),
+  sleep_search %>% mutate(search_topic = "sleep_problems"),
+  loneliness_search %>% mutate(search_topic = "loneliness_score")
+) %>%
+  select(search_topic, table, variable, label, type, n_missing) %>%
+  distinct(search_topic, table, variable, .keep_all = TRUE)
+
+function_mental_loneliness_search_results
+```
+
+```{r}
+selected_function_mental_vars <- c(
+  "headlba", "headlbe", "headldr", "headlea", "headlwa",
+  "headlwc", "headlda", "headlho", "headlma", "headlme",
+  "headlmo", "headlph", "headlpr", "headlsh", "headlsp",
+  "hemobch", "hemobcl", "hemobcs", "hemobli", "hemobpi",
+  "hemobpu", "hemobre", "hemobsi", "hemobst", "hemobwa",
+  "hefla", "heflb", "heflc",
+  "cesd_na", "cesd_sc",
+  "pscedc",
+  "scfeela", "scfeelb", "scfeelc"
+)
+
+var_w11_all_labeled %>%
+  filter(variable %in% selected_function_mental_vars) %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = selected_function_mental_vars,
+  value_dict = value_dict_w11_all
+)
+```
+
+## Export search results
+
+```{r}
+# export_xlsx(age_search, "age_search_results.xlsx", output_path)
+# export_xlsx(sex_search, "sex_search_results.xlsx", output_path)
+# export_xlsx(marital_search, "marital_search_results.xlsx", output_path)
+# export_xlsx(education_search, "education_search_results.xlsx", output_path)
+
+# export_xlsx(physical_health_search_results, "physical_health_search_results_all.xlsx", output_path)
+# export_xlsx(chronic_disease_search_results, "chronic_disease_search_results_all.xlsx", output_path)
+# export_xlsx(function_mental_loneliness_search_results, "function_mental_loneliness_search_results_all.xlsx", output_path)
+```
+
+
+### Social participation, Health behaviour, Cognition
+Social participation: living alone, social contact frequency, social participation count, volunteering participation, internet use, social support if available, caring responsibilities 
+Health behaviour: smoking status, alcohol consumption, BMI (Body Mass Index), physical activity
+Cognition: memory score, orientation score
+
+```{r}
+# These variables are mainly expected in the main, IFS-derived, IFS, or nurse tables.
+social_health_cognition_tables <- intersect(
+  c("w11_main", "w11_ifs_derived", "w11_ifs", "w11_nurse"),
+  unique(var_w11_all_labeled$table)
+)
+
+
+living_alone_search <- search_vars(
+  c(
+    "living alone",
+    "live alone",
+    "lives alone",
+    "living with",
+    "lives with",
+    "household size",
+    "number in household",
+    "household members",
+    "household composition",
+    "marital status",
+    "partner in household",
+    "spouse in household",
+    "couple",
+    "single household"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(living_alone_search)
+```
+
+
+```{r}
+social_contact_search <- search_vars(
+  c(
+    "social contact",
+    "contact frequency",
+    "frequency of contact",
+    "meet up",
+    "meet with",
+    "see friends",
+    "see family",
+    "see children",
+    "contact children",
+    "contact family",
+    "contact friends",
+    "phone contact",
+    "telephone contact",
+    "speak on phone",
+    "email contact",
+    "write to",
+    "communication",
+    "in touch",
+    "how often see",
+    "how often contact"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(social_contact_search)
+
+
+social_participation_search <- search_vars(
+  c(
+    "social participation",
+    "social activity",
+    "social activities",
+    "participation",
+    "take part",
+    "club",
+    "clubs",
+    "organisation",
+    "organization",
+    "society",
+    "membership",
+    "member of",
+    "community group",
+    "political party",
+    "trade union",
+    "religious group",
+    "church",
+    "charity",
+    "education class",
+    "evening class",
+    "arts group",
+    "music group",
+    "sports club",
+    "exercise class",
+    "committee",
+    "social club"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(social_participation_search)
+
+
+volunteering_search <- search_vars(
+  c(
+    "volunteer",
+    "volunteering",
+    "voluntary work",
+    "voluntary organisation",
+    "voluntary organization",
+    "charity work",
+    "unpaid work",
+    "helping organisation",
+    "helping organization",
+    "community volunteering"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(volunteering_search)
+
+
+internet_use_search <- search_vars(
+  c(
+    "internet",
+    "internet use",
+    "use the internet",
+    "online",
+    "web",
+    "email",
+    "e-mail",
+    "computer",
+    "digital",
+    "use a computer",
+    "access internet",
+    "broadband",
+    "social media"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(internet_use_search)
+
+
+social_support_search <- search_vars(
+  c(
+    "social support",
+    "support",
+    "emotional support",
+    "practical support",
+    "positive support",
+    "negative support",
+    "close to",
+    "confide",
+    "open up",
+    "rely on",
+    "understand",
+    "criticise",
+    "criticize",
+    "let you down",
+    "gets on your nerves",
+    "spouse support",
+    "partner support",
+    "children support",
+    "family support",
+    "friend support",
+    "relationship quality"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(social_support_search)
+
+
+caring_search <- search_vars(
+  c(
+    "care",
+    "caring",
+    "carer",
+    "caregiver",
+    "care giving",
+    "caregiving",
+    "look after",
+    "looked after",
+    "provide care",
+    "provided care",
+    "help someone",
+    "helping someone",
+    "informal care",
+    "unpaid care",
+    "care for",
+    "caring responsibilities",
+    "personal care",
+    "help with activities"
+  ),
+  var_dict = var_w11_all_labeled
+) %>% 
+  filter(table %in% social_health_cognition_tables)
+
+head(caring_search)
+```
+
+```{r}
+smoking_search <- search_vars(
+  c(
+    "smoking",
+    "smoke",
+    "smoker",
+    "smoking status",
+    "current smoker",
+    "former smoker",
+    "ex-smoker",
+    "never smoked",
+    "cigarette",
+    "cigarettes",
+    "tobacco",
+    "pipe",
+    "cigar"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(smoking_search)
+
+
+alcohol_search <- search_vars(
+  c(
+    "alcohol",
+    "drink",
+    "drinking",
+    "alcohol consumption",
+    "alcohol intake",
+    "frequency of drinking",
+    "how often drink",
+    "units of alcohol",
+    "beer",
+    "wine",
+    "spirits",
+    "binge drinking",
+    "drinks per week",
+    "alcoholic drink"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(alcohol_search)
+
+
+bmi_search <- search_vars(
+  c(
+    "BMI",
+    "body mass index",
+    "bodymass",
+    "height",
+    "weight",
+    "measured height",
+    "measured weight",
+    "self-reported height",
+    "self-reported weight",
+    "obese",
+    "obesity",
+    "overweight",
+    "underweight"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(bmi_search)
+
+
+physical_activity_search <- search_vars(
+  c(
+    "physical activity",
+    "physically active",
+    "exercise",
+    "sport",
+    "sports",
+    "walking",
+    "vigorous activity",
+    "moderate activity",
+    "mild activity",
+    "light activity",
+    "frequency of activity",
+    "frequency of exercise",
+    "work out",
+    "keep fit",
+    "active",
+    "sedentary"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(physical_activity_search)
+```
+
+
+```{r}
+memory_score_search <- search_vars(
+  c(
+    "memory",
+    "memory score",
+    "immediate recall",
+    "delayed recall",
+    "word recall",
+    "recall score",
+    "remember",
+    "remembered",
+    "words remembered",
+    "prospective memory",
+    "verbal memory",
+    "cognitive memory"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(memory_score_search)
+
+
+orientation_score_search <- search_vars(
+  c(
+    "orientation",
+    "orientation score",
+    "date",
+    "day",
+    "month",
+    "year",
+    "day of week",
+    "day of the week",
+    "today's date",
+    "cognitive orientation",
+    "time orientation",
+    "temporal orientation"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% social_health_cognition_tables)
+
+head(orientation_score_search)
+
+```
+
+```{r}
+# Combine all search results for review.
+
+social_health_cognition_search_results <- bind_rows(
+  living_alone_search %>% mutate(search_topic = "living_alone"),
+  social_contact_search %>% mutate(search_topic = "social_contact_frequency"),
+  social_participation_search %>% mutate(search_topic = "social_participation_count"),
+  volunteering_search %>% mutate(search_topic = "volunteering_participation"),
+  internet_use_search %>% mutate(search_topic = "internet_use"),
+  social_support_search %>% mutate(search_topic = "social_support"),
+  caring_search %>% mutate(search_topic = "caring_responsibilities"),
+  
+  smoking_search %>% mutate(search_topic = "smoking_status"),
+  alcohol_search %>% mutate(search_topic = "alcohol_consumption"),
+  bmi_search %>% mutate(search_topic = "bmi_body_mass_index"),
+  physical_activity_search %>% mutate(search_topic = "physical_activity"),
+  
+  memory_score_search %>% mutate(search_topic = "memory_score"),
+  orientation_score_search %>% mutate(search_topic = "orientation_score")
+) %>%
+  select(search_topic, table, variable, label, type, n_missing) %>%
+  distinct(search_topic, table, variable, .keep_all = TRUE)
+
+# Preview combined results.
+head(social_health_cognition_search_results)
+
+# export_xlsx(social_health_cognition_search_results, "social_health_cognition_search_results.xlsx", output_path)
+```
+
+```{r}
+selected_social_health_cognition_vars <- c(
+  "scorg95", "scorg96", "scorgch", "scorged", "scorgnw", "scorgpo", "scorgrl", "scorgsc", "scorgsp", "erfvoft", "scinf", "scchda", "scchdb", "scchdc", "scchdd", "scfama", "scfamb", "scfamc", "scfamd", "scfrda", "scfrdb", "scfrdc", "scfrdd", "scprta", "scprtb", "scprtc", "scprtd", "ercaa", "smokerstat", "scako", "bmi", "bmival", "heacta", "heactb", "heactc", "memtot", "cfdscr"
+)
+
+var_w11_all_labeled %>%
+  filter(variable %in% selected_social_health_cognition_vars) %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = selected_social_health_cognition_vars,
+  value_dict = value_dict_w11_all
+)
+```
+
+
+## Search additional candidate variables
+ food insecurity
+ subjective financial strain / subjective social status
+ anxiety
+ receiving care / receiving help
+```{r}
+# These variables are mainly expected in the main, IFS-derived, IFS, or nurse tables.
+new_candidate_tables <- intersect(
+  c("w11_main", "w11_ifs_derived", "w11_ifs", "w11_nurse"),
+  unique(var_w11_all_labeled$table)
+)
+```
+
+```{r}
+food_insecurity_search <- search_vars(
+  c(
+    "food insecurity",
+    "food insecure",
+    "food",
+    "not enough food",
+    "enough food",
+    "afford food",
+    "unable to afford food",
+    "skip meal",
+    "skipped meal",
+    "miss meal",
+    "missed meal",
+    "cut size of meals",
+    "reduce meal",
+    "reduced meal",
+    "eat less",
+    "hungry",
+    "hunger",
+    "food bank",
+    "meal",
+    "HoMeal",
+    "homeal",
+    "scaffda",
+    "scaffdb"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% new_candidate_tables)
+
+head(food_insecurity_search)
+
+subjective_financial_strain_search <- search_vars(
+  c(
+    "subjective financial",
+    "financial strain",
+    "financial stress",
+    "financial pressure",
+    "financial difficulty",
+    "financial difficulties",
+    "financial situation",
+    "manage financially",
+    "managing financially",
+    "manage money",
+    "money problem",
+    "money problems",
+    "money shortage",
+    "make ends meet",
+    "ends meet",
+    "getting by",
+    "just about getting by",
+    "living comfortably",
+    "doing alright",
+    "quite difficult",
+    "very difficult",
+    "difficulty paying",
+    "unable to pay",
+    "keep up with bills",
+    "bills",
+    "debt",
+    "arrears",
+    "subjective social status",
+    "social status",
+    "social ladder",
+    "ladder"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% new_candidate_tables)
+
+head(subjective_financial_strain_search)
+
+anxiety_search <- search_vars(
+  c(
+    "anxiety",
+    "anxious",
+    "felt anxious",
+    "feeling anxious",
+    "worry",
+    "worried",
+    "worries",
+    "nervous",
+    "nervousness",
+    "panic",
+    "panic attack",
+    "fearful",
+    "felt fearful",
+    "mental health",
+    "psychiatric",
+    "emotional problem",
+    "emotional problems",
+    "GAD",
+    "generalised anxiety",
+    "generalized anxiety"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% new_candidate_tables)
+
+head(anxiety_search)
+
+receiving_care_help_search <- search_vars(
+  c(
+    "receive care",
+    "receiving care",
+    "received care",
+    "get care",
+    "getting care",
+    "got care",
+    "receive help",
+    "receiving help",
+    "received help",
+    "get help",
+    "getting help",
+    "got help",
+    "help received",
+    "help with activities",
+    "help with daily activities",
+    "help with personal care",
+    "personal care",
+    "home care",
+    "social care",
+    "care package",
+    "care services",
+    "social services",
+    "formal care",
+    "informal care",
+    "paid care",
+    "paid carer",
+    "paid helper",
+    "carer",
+    "caregiver",
+    "helper",
+    "home help",
+    "meals on wheels",
+    "nursing care",
+    "residential care",
+    "sheltered housing",
+    "support worker"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% new_candidate_tables)
+
+head(receiving_care_help_search)
+```
+
+```{r}
+# Combine all search results.
+new_candidate_search_results <- bind_rows(
+  food_insecurity_search %>% 
+    mutate(search_topic = "food_insecurity"),
+  
+  subjective_financial_strain_search %>% 
+    mutate(search_topic = "subjective_financial_strain"),
+  
+  anxiety_search %>% 
+    mutate(search_topic = "anxiety"),
+  
+  receiving_care_help_search %>% 
+    mutate(search_topic = "receiving_care_help")
+) %>%
+  select(search_topic, table, variable, label, type, n_missing) %>%
+  distinct(search_topic, table, variable, .keep_all = TRUE)
+
+# export_xlsx(new_candidate_search_results, "new_candidate_search_results.xlsx", output_path)
+
+```
+
+## Search original CES-D item variables
+```{r}
+## Aim: identify the original item variables used to construct CES-D score,
+## rather than the derived cesd_sc or cesd_na variables.
+
+cesd_tables <- intersect(
+  c("w11_main", "w11_ifs_derived", "w11_ifs", "w11_nurse"),
+  unique(var_w11_all_labeled$table)
+)
+
+cesd_item_search <- search_vars(
+  c(
+    "CES-D",
+    "CESD",
+    "Center for Epidemiologic Studies Depression",
+    "Centre for Epidemiologic Studies Depression",
+    
+    # CES-D 8-item symptoms
+    "felt depressed",
+    "depressed",
+    "everything was an effort",
+    "effort",
+    "sleep was restless",
+    "restless sleep",
+    "felt happy",
+    "happy",
+    "felt lonely",
+    "lonely",
+    "enjoyed life",
+    "enjoy life",
+    "felt sad",
+    "sad",
+    "could not get going",
+    "get going",
+    
+    # possible variable name pattern
+    "psced"
+  ),
+  var_dict = var_w11_all_labeled
+) %>%
+  filter(table %in% cesd_tables)
+
+head(cesd_item_search, 10)
+
+# export_xlsx(cesd_item_search, "cesd_item_search.xlsx", output_path)
+```
+```{r}
+selected_additional_vars <- c(
+  'catno','homeal','scaffda','scaffdb','sclddr','scafrai','scanno','scanxe','scresl','scrlax','scwrys','scwryt','psceda','pscedb','pscedc','pscedd','pscede','pscedf','pscedg','pscedh'
+)
+
+var_w11_all_labeled %>%
+  filter(variable %in% selected_additional_vars) %>%
+  select(table, variable, label, type, n_missing)
+```
+
+```{r}
+search_code(
+  var_names = selected_additional_vars,
+  value_dict = value_dict_w11_all
+)
+```
+
+
+## additional features
+```{r}
+selected_additional_vars2 <- c(
+'hedids7','cahsmpc','cahnbr','cahncl','cahnda','cahnfr','cahngc','cahnhc','cahnhm','cahnhw','cahnne','cahnnh','cahnor','cahnot','cahnre','cahnsi','cahnso','cahnvo','cahnwa','cahsa','caany'
+)
+
+search_code(
+  var_names = selected_additional_vars2,
+  value_dict = value_dict_w11_all
+)
+```
+
+## Feature matching summary
+
+After checking the Wave 11 metadata and value-label dictionaries, the candidate predictors used in this project were matched to their corresponding ELSA table names and variable names. The matched results were then organised into an Excel file, `Preliminary Feature Selection.xlsx`, and saved in the `data/upload` folder. This file was used as the reference list for the later dataset construction step, so that each selected feature could be linked back to its original field in the raw Wave 11 data.
+
+```{r}
+selected_features <- readxl::read_excel(
+  here::here("data", "upload", "Preliminary Feature Selection.xlsx")
+)
+
+selected_features
+```
+

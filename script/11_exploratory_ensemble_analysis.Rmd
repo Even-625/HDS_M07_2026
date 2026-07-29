@@ -1,0 +1,736 @@
+---
+title: "11_exploratory_ensemble_analysis"
+author: "Yiwen Xiang"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+---
+
+This file uses the important-feature model test-set predictions saved by `09_heldout_test_evaluation.Rmd` to evaluate simple ensemble models. It does not retrain models. Instead, it compares single-model performance, prediction correlations, and all three-model majority-voting combinations among the six important-feature models.
+
+The ensemble analysis uses predicted Low_QoL probabilities for the correlation matrix and predicted classes recreated at the default threshold of 0.50 for majority voting.
+
+# 1. Setup
+
+```{r, include=FALSE}
+source(here::here("script", "00_packages.R"))
+
+set.seed(123)
+
+# Low_QoL is the positive event for all classification metrics.
+options(yardstick.event_first = TRUE)
+```
+
+# 2. Load important-feature model predictions
+
+```{r}
+
+prediction_file <- file.path(
+  processed_path,
+  "09_important_model_test_predictions_all6.rds"
+)
+
+
+if (!file.exists(prediction_file)) {
+  stop(
+    "Cannot find important-feature test predictions. Please run 09_heldout_test_evaluation.Rmd first: ",
+    prediction_file
+  )
+}
+
+selected_model_predictions <- readRDS(prediction_file)
+```
+
+```{r}
+required_cols <- c(
+  "idauniq",
+  "qol_status",
+  "model_id",
+  "model",
+  ".pred_Low_QoL",
+  ".pred_Non_low_QoL",
+  ".pred_class"
+)
+
+missing_cols <- setdiff(required_cols, names(selected_model_predictions))
+
+if (length(missing_cols) > 0) {
+  stop(
+    "The prediction file is missing required columns: ",
+    paste(missing_cols, collapse = ", ")
+  )
+}
+```
+
+```{r}
+selected_model_predictions <- selected_model_predictions %>%
+  mutate(
+    qol_status = factor(
+      as.character(qol_status),
+      levels = c("Low_QoL", "Non_low_QoL")
+    ),
+    .pred_class = factor(
+      as.character(.pred_class),
+      levels = c("Low_QoL", "Non_low_QoL")
+    )
+  )
+
+if (anyNA(selected_model_predictions$qol_status)) {
+  stop(
+    "Unknown or missing outcome labels were found."
+  )
+}
+
+
+selected_model_predictions %>%
+  count(model)
+```
+
+# 3. Model registry
+
+```{r}
+expected_model_ids <- c(
+  "lasso_logistic_selected",
+  "rf_selected",
+  "xgb_selected",
+  "catboost_selected",
+  "lightgbm_selected",
+  "mlp_selected"
+)
+
+observed_model_ids <- sort(
+  unique(selected_model_predictions$model_id)
+)
+
+if (!setequal(expected_model_ids, observed_model_ids)) {
+  stop(
+    paste0(
+      "Unexpected model set. Expected: ",
+      paste(expected_model_ids, collapse = ", "),
+      ". Observed: ",
+      paste(observed_model_ids, collapse = ", ")
+    )
+  )
+}
+
+inconsistent_model_labels <- selected_model_predictions %>%
+  distinct(model_id, model) %>%
+  count(model_id) %>%
+  filter(n != 1)
+
+if (nrow(inconsistent_model_labels) > 0) {
+  stop(
+    "Some model IDs are associated with multiple model labels."
+  )
+}
+
+duplicate_predictions <- selected_model_predictions %>%
+  count(idauniq, model_id) %>%
+  filter(n != 1)
+
+if (nrow(duplicate_predictions) > 0) {
+  stop(
+    "Some participants do not have exactly one prediction per model."
+  )
+}
+
+incomplete_model_coverage <- selected_model_predictions %>%
+  distinct(idauniq, model_id) %>%
+  count(idauniq) %>%
+  filter(n != length(expected_model_ids))
+
+if (nrow(incomplete_model_coverage) > 0) {
+  stop(
+    "Some participants do not have predictions from all six models."
+  )
+}
+
+inconsistent_outcomes <- selected_model_predictions %>%
+  distinct(idauniq, qol_status) %>%
+  count(idauniq) %>%
+  filter(n != 1)
+
+if (nrow(inconsistent_outcomes) > 0) {
+  stop(
+    "Some participants have inconsistent outcome labels across models."
+  )
+}
+
+if (
+  anyNA(selected_model_predictions$.pred_Low_QoL) ||
+  anyNA(selected_model_predictions$.pred_Non_low_QoL)
+) {
+  stop("Missing predicted probabilities were found.")
+}
+
+if (
+  any(selected_model_predictions$.pred_Low_QoL < 0) ||
+  any(selected_model_predictions$.pred_Low_QoL > 1) ||
+  any(selected_model_predictions$.pred_Non_low_QoL < 0) ||
+  any(selected_model_predictions$.pred_Non_low_QoL > 1)
+) {
+  stop("Predicted probabilities outside the range 0 to 1 were found.")
+}
+
+if (
+  any(
+    abs(
+      selected_model_predictions$.pred_Low_QoL +
+        selected_model_predictions$.pred_Non_low_QoL -
+        1
+    ) > 1e-6
+  )
+) {
+  stop(
+    "The predicted probabilities do not sum to 1."
+  )
+}
+
+make_short_model_name <- function(model_id) {
+  case_when(
+    model_id == "lasso_logistic_selected" ~ "LASSO",
+    model_id == "rf_selected" ~ "Random Forest",
+    model_id == "xgb_selected" ~ "XGBoost",
+    model_id == "catboost_selected" ~ "CatBoost",
+    model_id == "lightgbm_selected" ~ "LightGBM",
+    model_id == "mlp_selected" ~ "MLP",
+    TRUE ~ model_id
+  )
+}
+
+model_registry <- selected_model_predictions %>%
+  distinct(model_id, model) %>%
+  mutate(
+    model_short = make_short_model_name(model_id),
+    model_order = match(model_id, expected_model_ids)
+  ) %>%
+  arrange(model_order) %>%
+  select(-model_order)
+
+ensemble_model_ids <- model_registry$model_id
+
+selected_model_predictions <- selected_model_predictions %>%
+  left_join(
+    model_registry %>% select(model_id, model_short),
+    by = "model_id"
+  )
+
+model_registry
+```
+
+# 4. Helper function for probability-to-class conversion
+
+```{r}
+
+default_threshold <- 0.5
+
+make_class_from_probability <- function(probability, threshold = 0.5) {
+  factor(
+    if_else(probability >= threshold, "Low_QoL", "Non_low_QoL"),
+    levels = c("Low_QoL", "Non_low_QoL")
+  )
+}
+```
+
+# 5. Helper function for model evaluation
+
+```{r}
+
+evaluate_predictions <- function(pred_df, result_type, threshold = 0.5) {
+  
+  model_id_i <- unique(pred_df$model_id)
+  
+  if ("model_short" %in% names(pred_df)) {
+    model_i <- unique(pred_df$model_short)
+  } else {
+    model_i <- unique(pred_df$model)
+  }
+  
+  if (length(model_id_i) != 1) {
+    stop(
+      "Each evaluation data frame must contain exactly one model_id."
+    )
+  }
+  
+  if (
+    length(model_i) != 1 ||
+    anyNA(model_i)
+  ) {
+    stop(
+      "Each evaluation data frame must contain exactly one model label."
+    )
+  }
+  
+  # Recreate classes so all models use the same threshold.
+  pred_eval <- pred_df %>%
+    mutate(
+      qol_status = factor(
+        as.character(qol_status),
+        levels = c("Low_QoL", "Non_low_QoL")
+      ),
+      .pred_class = make_class_from_probability(.pred_Low_QoL, threshold)
+    )
+  
+
+  bind_rows(
+    pred_eval %>%
+      roc_auc(truth = qol_status, .pred_Low_QoL, event_level = "first"),
+    
+    pred_eval %>%
+      pr_auc(truth = qol_status, .pred_Low_QoL, event_level = "first"),
+    
+    pred_eval %>%
+      accuracy(truth = qol_status, estimate = .pred_class),
+    
+    pred_eval %>%
+      precision(truth = qol_status, estimate = .pred_class, event_level = "first"),
+    
+    pred_eval %>%
+      sens(truth = qol_status, estimate = .pred_class, event_level = "first"),
+    
+    pred_eval %>%
+      spec(truth = qol_status, estimate = .pred_class, event_level = "first"),
+    
+    pred_eval %>%
+      f_meas(truth = qol_status, estimate = .pred_class, event_level = "first")
+  ) %>%
+    mutate(
+      result_type = result_type,
+      model_id = model_id_i,
+      model = model_i,
+      threshold = threshold
+    ) %>%
+    select(
+      result_type,
+      model_id,
+      model,
+      threshold,
+      .metric,
+      .estimator,
+      .estimate
+    )
+}
+```
+
+# 6. Helper function for metric tables
+
+```{r}
+metrics_to_wide <- function(metrics_long) {
+  metrics_long %>%
+    mutate(
+      .metric = case_when(
+        .metric == "roc_auc" ~ "ROC_AUC",
+        .metric == "pr_auc" ~ "PR_AUC",
+        .metric == "accuracy" ~ "Accuracy",
+        .metric == "precision" ~ "Precision",
+        .metric == "sens" ~ "Sensitivity/Recall",
+        .metric == "spec" ~ "Specificity",
+        .metric == "f_meas" ~ "F1",
+        TRUE ~ .metric
+      )
+    ) %>%
+    select(
+      result_type,
+      model_id,
+      model,
+      threshold,
+      .metric,
+      .estimate
+    ) %>%
+    pivot_wider(
+      names_from = .metric,
+      values_from = .estimate
+    ) %>%
+    select(
+      result_type,
+      model_id,
+      Model = model,
+      threshold,
+      ROC_AUC,
+      PR_AUC,
+      Accuracy,
+      Precision,
+      `Sensitivity/Recall`,
+      Specificity,
+      F1
+    )
+}
+```
+
+# 7. Single-model performance
+
+```{r}
+single_model_results_long <- selected_model_predictions %>%
+  split(.$model_id) %>%
+  map_dfr(
+    ~ evaluate_predictions(
+      pred_df = .x,
+      result_type = "single_model",
+      threshold = default_threshold
+    )
+  )
+
+single_model_results_wide <- metrics_to_wide(single_model_results_long) %>%
+  mutate(model_order = match(model_id, ensemble_model_ids)) %>%
+  arrange(model_order) %>%
+  select(-model_order)
+
+single_model_results_wide
+```
+
+# 8. Wide prediction tables
+
+```{r}
+probability_wide <- selected_model_predictions %>%
+  select(idauniq, qol_status, model_id, .pred_Low_QoL) %>%
+  pivot_wider(
+    names_from = model_id,
+    values_from = .pred_Low_QoL
+  )
+
+class_wide <- selected_model_predictions %>%
+  mutate(
+    .pred_class_vote = make_class_from_probability(
+      .pred_Low_QoL,
+      threshold = default_threshold
+    )
+  ) %>%
+  select(
+    idauniq,
+    qol_status,
+    model_id,
+    .pred_class = .pred_class_vote
+  ) %>%
+  pivot_wider(
+    names_from = model_id,
+    values_from = .pred_class
+  )
+
+head(probability_wide)
+head(class_wide)
+```
+
+# 9. Prediction correlation matrix
+
+```{r}
+prediction_correlation_matrix <- probability_wide %>%
+  select(all_of(ensemble_model_ids)) %>%
+  cor(
+    use = "complete.obs",
+    method = "pearson"
+  )
+
+correlation_model_names <- setNames(
+  model_registry$model_short,
+  model_registry$model_id
+)
+
+rownames(prediction_correlation_matrix) <- correlation_model_names[
+  rownames(prediction_correlation_matrix)
+]
+colnames(prediction_correlation_matrix) <- correlation_model_names[
+  colnames(prediction_correlation_matrix)
+]
+
+prediction_correlation_table <- prediction_correlation_matrix %>%
+  as.data.frame() %>%
+  rownames_to_column("Model")
+
+prediction_correlation_table
+```
+
+```{r}
+prediction_correlation_long <- prediction_correlation_table %>%
+  pivot_longer(
+    cols = -Model,
+    names_to = "model_2",
+    values_to = "correlation"
+  ) %>%
+  rename(model_1 = Model)
+
+pairwise_correlation_pairs <- prediction_correlation_long %>%
+  filter(as.character(model_1) < as.character(model_2)) %>%
+  arrange(desc(correlation))
+
+correlation_summary <- pairwise_correlation_pairs %>%
+  summarise(
+    minimum_correlation = min(correlation),
+    maximum_correlation = max(correlation),
+    mean_correlation = mean(correlation)
+  )
+
+high_correlation_pairs <- pairwise_correlation_pairs %>%
+  filter(correlation >= 0.90) %>%
+  select(model_1, model_2, correlation)
+
+pairwise_correlation_pairs
+correlation_summary
+high_correlation_pairs
+```
+
+```{r}
+prediction_correlation_heatmap <- prediction_correlation_long %>%
+  mutate(
+    model_1 = factor(model_1, levels = model_registry$model_short),
+    model_2 = factor(model_2, levels = model_registry$model_short)
+  ) %>%
+  ggplot(aes(x = model_2, y = model_1, fill = correlation)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = round(correlation, 2)), size = 4.2) +
+  scale_fill_gradient(
+    low = "#EEF8F4",
+    high = "#74B3C2",
+    limits = c(0, 1)
+  ) +
+  labs(
+    title = "Prediction Correlation Matrix",
+    subtitle = "Pearson correlation of predicted low QoL probabilities",
+    x = NULL,
+    y = NULL,
+    fill = "Correlation"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 12),
+    axis.text.y = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    panel.grid = element_blank()
+  )
+
+prediction_correlation_heatmap
+```
+
+The correlation matrix was used to describe the similarity of predicted Low_QoL probabilities across the six important-feature models. The observed correlation range was interpreted together with the majority-voting results.
+
+# 10. Three-model majority voting
+
+The next analysis compares all possible three-model majority-voting combinations among all six important-feature models. With six models, this gives:
+
+```text
+C(6, 3) = 20 combinations
+```
+
+For each three-model combination, the voting rule is:
+
+```text
+at least 2 of the 3 models predict Low_QoL
+=> the ensemble predicts Low_QoL
+```
+
+This step does not retrain models. It provides an exploratory descriptive comparison of all three-model majority-voting combinations on the same test set. The ranking is not used to select a final independently validated ensemble.
+
+For majority-voting ensembles, ROC-AUC and PR-AUC are calculated using the proportion of models voting for Low_QoL as the ensemble score.
+
+```{r}
+three_model_combinations <- combn(
+  ensemble_model_ids,
+  3,
+  simplify = FALSE
+)
+
+length(three_model_combinations)
+three_model_combinations
+
+stopifnot(
+  length(three_model_combinations) == choose(length(ensemble_model_ids), 3),
+  length(three_model_combinations) == 20L
+)
+```
+
+```{r}
+make_three_model_majority_predictions <- function(model_ids) {
+  
+  combination_registry <- model_registry %>%
+    filter(model_id %in% model_ids) %>%
+    mutate(model_order = match(model_id, model_ids)) %>%
+    arrange(model_order)
+  
+  combination_id <- paste(model_ids, collapse = "__")
+  combination_label <- paste(combination_registry$model_short, collapse = " + ")
+  
+  vote_matrix_i <- class_wide %>%
+    select(all_of(model_ids)) %>%
+    mutate(
+      across(
+        everything(),
+        ~ as.character(.x) == "Low_QoL"
+      )
+    ) %>%
+    as.matrix()
+  
+  model_n_i <- length(model_ids)
+  majority_cutoff_i <- ceiling(model_n_i / 2)
+  low_qol_vote_count_i <- rowSums(vote_matrix_i)
+  
+  tibble(
+    idauniq = class_wide$idauniq,
+    qol_status = class_wide$qol_status,
+    model_id = paste0("three_model_majority__", combination_id),
+    model = paste0("Three-model majority: ", combination_label),
+    model_combination_id = combination_id,
+    model_combination = combination_label,
+    low_qol_vote_count = low_qol_vote_count_i,
+    model_n = model_n_i,
+    majority_cutoff = majority_cutoff_i,
+    .pred_Low_QoL = low_qol_vote_count_i / model_n_i,
+    .pred_Non_low_QoL = 1 - .pred_Low_QoL,
+    .pred_class = factor(
+      if_else(low_qol_vote_count_i >= majority_cutoff_i, "Low_QoL", "Non_low_QoL"),
+      levels = c("Low_QoL", "Non_low_QoL")
+    )
+  )
+}
+```
+
+```{r}
+three_model_majority_predictions <- map_dfr(
+  three_model_combinations,
+  make_three_model_majority_predictions
+)
+
+test_sample_size <- n_distinct(
+  selected_model_predictions$idauniq
+)
+
+stopifnot(
+  nrow(three_model_majority_predictions) == 20L * test_sample_size
+)
+
+three_model_majority_predictions %>%
+  count(model_id, model)
+```
+
+```{r}
+three_model_majority_results_long <- three_model_majority_predictions %>%
+  split(.$model_id) %>%
+  map_dfr(
+    ~ evaluate_predictions(
+      pred_df = .x,
+      result_type = "three_model_ensemble",
+      threshold = default_threshold
+    )
+  )
+
+three_model_majority_results_wide <- metrics_to_wide(
+  three_model_majority_results_long
+) %>%
+  mutate(
+    model_combination = str_remove(Model, "^Three-model majority: ")
+  ) %>%
+  select(
+    result_type,
+    model_id,
+    model_combination,
+    Model,
+    threshold,
+    ROC_AUC,
+    PR_AUC,
+    Accuracy,
+    Precision,
+    `Sensitivity/Recall`,
+    Specificity,
+    F1
+  )
+
+three_model_majority_results_wide
+```
+
+```{r}
+three_model_majority_results_ranked <- three_model_majority_results_wide %>%
+  arrange(
+    desc(F1),
+    desc(`Sensitivity/Recall`),
+    desc(PR_AUC),
+    desc(ROC_AUC)
+  )
+
+three_model_majority_results_ranked
+```
+
+# 11. Export results
+
+```{r}
+comparison_excel_file <- file.path(
+  output_path,
+  "11_three_model_majority_voting_results.xlsx"
+)
+
+correlation_plot_file <- file.path(
+  picture_path,
+  "11_prediction_correlation_heatmap.png"
+)
+
+metric_columns <- c(
+  "ROC_AUC",
+  "PR_AUC",
+  "Accuracy",
+  "Precision",
+  "Sensitivity/Recall",
+  "Specificity",
+  "F1"
+)
+
+single_model_results_export <- single_model_results_wide %>%
+  mutate(
+    across(
+      all_of(metric_columns),
+      ~ round(.x, 3)
+    )
+  )
+
+three_model_results_export <- three_model_majority_results_wide %>%
+  mutate(
+    across(
+      all_of(metric_columns),
+      ~ round(.x, 3)
+    )
+  )
+
+three_model_ranked_export <- three_model_majority_results_ranked %>%
+  mutate(
+    across(
+      all_of(metric_columns),
+      ~ round(.x, 3)
+    )
+  )
+```
+
+
+```{r}
+write_xlsx(
+  list(
+    three_model_ranked = three_model_ranked_export,
+    three_model_results = three_model_results_export,
+    single_model_results = single_model_results_export,
+    correlation_matrix = prediction_correlation_table,
+    correlation_pairs = pairwise_correlation_pairs,
+    correlation_summary = correlation_summary,
+    high_correlation_pairs = high_correlation_pairs
+  ),
+  comparison_excel_file
+)
+
+ggsave(
+  filename = correlation_plot_file,
+  plot = prediction_correlation_heatmap,
+  width = 9,
+  height = 6,
+  dpi = 300
+)
+
+```
+
+```{r}
+message("11 three-model majority-voting ensemble analysis completed.")
+message("Read predictions from: ", prediction_file)
+message("Saved three-model comparison Excel: ", comparison_excel_file)
+message("Saved correlation heatmap: ", correlation_plot_file)
+```
