@@ -1,6 +1,6 @@
-# Script order
+# M07 HDS Final Project
 
-This folder contains the main analysis scripts for the HDS final project:
+This repository contains the main analysis scripts and reproducibility materials for the HDS final project:
 
 **Identifying Low Quality of Life among Older Adults in England Using Machine Learning: An Analysis of ELSA Wave 11**
 
@@ -9,6 +9,32 @@ The scripts are numbered in the order I used them. In general, they should be ru
 ## GitHub upload note
 
 For the GitHub version, I only include the project README, analysis scripts, exported result tables, and figures. The folders `data/wave11/` and `data/processed/` are kept locally and are not uploaded to GitHub. They contain the restricted ELSA Wave 11 raw files and intermediate analysis datasets, so they should not be shared publicly.
+
+## Data source and access
+
+The data used in this project come from the English Longitudinal Study of Ageing (ELSA), Wave 11. The study page is available from the UK Data Service:
+
+https://datacatalogue.ukdataservice.ac.uk/studies/study/5050#details
+
+![UK Data Service ELSA study page](pictures/data_access/data_access_01_study_page.png)
+
+To access the files, sign in to the UK Data Service and add the study to your account. The data are listed as safeguarded, so users need to follow the UK Data Service licence conditions.
+
+![Add ELSA study to UK Data Service account](pictures/data_access/data_access_02_add_to_account.png)
+
+After access is granted, download the TAB version of the dataset and unzip it locally. In the extracted `UKDA-5050-tab/tab/` folder, use the seven Wave 11 `.tab` files. The corresponding seven Wave 11 data dictionary Excel files are available in the documentation folders, such as `mrdoc/excel/`.
+
+![UK Data Service download options](pictures/data_access/data_access_03_download_options.png)
+
+Place the seven Wave 11 TAB files and the seven Wave 11 data dictionary Excel files in:
+
+```text
+data/wave11/
+```
+
+![Wave 11 files used locally](pictures/data_access/data_access_04_wave11_files.png)
+
+These data files are needed to reproduce the full workflow, but they are not included in this GitHub repository.
 
 ## Project folders
 
