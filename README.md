@@ -1,32 +1,28 @@
 # M07 HDS Final Project
 
-This repository contains the main analysis scripts and reproducibility materials for the HDS final project:
+This repository contains the code and reproducibility materials for my HDS final project:
 
 **Identifying Low Quality of Life among Older Adults in England Using Machine Learning: An Analysis of ELSA Wave 11**
 
-The scripts are numbered in the order I used them. In general, they should be run from `00` to `11` in a clean R session. The raw ELSA Wave 11 data are not included here because access is restricted.
+The GitHub version includes the analysis scripts, README, output tables, and figures. The raw ELSA Wave 11 data and processed datasets are not uploaded because they are subject to UK Data Service access and licence restrictions.
 
-## GitHub upload note
+## Data source
 
-For the GitHub version, I only include the project README, analysis scripts, exported result tables, and figures. The folders `data/wave11/` and `data/processed/` are kept locally and are not uploaded to GitHub. They contain the restricted ELSA Wave 11 raw files and intermediate analysis datasets, so they should not be shared publicly.
-
-## Data source and access
-
-The data used in this project come from the English Longitudinal Study of Ageing (ELSA), Wave 11. The study page is available from the UK Data Service:
+The data come from the English Longitudinal Study of Ageing (ELSA), Wave 11. The study page is available here:
 
 https://datacatalogue.ukdataservice.ac.uk/studies/study/5050#details
 
 ![UK Data Service ELSA study page](pictures/data_access/data_access_01_study_page.png)
 
-To access the files, sign in to the UK Data Service and add the study to your account. The data are listed as safeguarded, so users need to follow the UK Data Service licence conditions.
+After signing in to the UK Data Service, add the study to your account. The data are listed as safeguarded, so users need to follow the UK Data Service licence conditions.
 
 ![Add ELSA study to UK Data Service account](pictures/data_access/data_access_02_add_to_account.png)
 
-After access is granted, download the TAB version of the dataset and unzip it locally. In the extracted `UKDA-5050-tab/tab/` folder, use the seven Wave 11 `.tab` files. The corresponding seven Wave 11 data dictionary Excel files are available in the documentation folders, such as `mrdoc/excel/`.
+Download the TAB version of the dataset and unzip it locally. From the extracted `UKDA-5050-tab/tab/` folder, use the seven Wave 11 `.tab` files. The matching Wave 11 data dictionary Excel files are in the documentation folders, such as `mrdoc/excel/`.
 
 ![UK Data Service download options](pictures/data_access/data_access_03_download_options.png)
 
-Place the seven Wave 11 TAB files and the seven Wave 11 data dictionary Excel files in:
+Place the seven Wave 11 TAB files and seven data dictionary Excel files in:
 
 ```text
 data/wave11/
@@ -34,101 +30,58 @@ data/wave11/
 
 ![Wave 11 files used locally](pictures/data_access/data_access_04_wave11_files.png)
 
-These data files are needed to reproduce the full workflow, but they are not included in this GitHub repository.
+## Running the scripts
 
-## Project folders
+Run the scripts in number order from a clean R session.
 
-### data/
+For the paired files `00_packages.R` / `00_packages.Rmd` and `02_functions.R` / `02_functions.Rmd`, use the `.R` files for execution or sourcing. The `.Rmd` versions were kept mainly for readable rendered output/HTML.
 
-Stores the data files used or created during the analysis.
+General order:
 
-- `data/wave11/` contains the original ELSA Wave 11 files and data dictionaries. These files are access-restricted and should not be shared publicly.
-- `data/upload/` contains manually prepared input files used by the scripts, such as the preliminary feature-selection spreadsheet.
-- `data/processed/` contains intermediate datasets, model objects, train/test split IDs, and prediction files created by the scripts.
+```text
+00_packages.R
+01_import_wave11.Rmd
+02_functions.R
+03_build_wave11_metadata.Rmd
+04_variable_matching.Rmd
+05_filter_analysis_sample.Rmd
+06_outcome_casp19.Rmd
+07_EDA01_base_features.Rmd
+07_EDA02_additional_features.Rmd
+07_EDA03_feature_screening.Rmd
+08_model_development_training_only.Rmd
+09_heldout_test_evaluation.Rmd
+10_exploratory_lasso_weight_threshold.Rmd
+11_exploratory_ensemble_analysis.Rmd
+```
 
-### output/
+## Script overview
 
-Contains exported result tables, mostly Excel files. These include sample summaries, feature-screening outputs, model performance tables, model-selection results, and exploratory threshold or ensemble results.
+- `00_packages.R`: loads packages and sets shared paths.
+- `01_import_wave11.Rmd`: imports the Wave 11 raw data files.
+- `02_functions.R`: stores helper functions used by later scripts.
+- `03_build_wave11_metadata.Rmd`: builds variable metadata and value-label information.
+- `04_variable_matching.Rmd`: records how candidate variables were identified.
+- `05_filter_analysis_sample.Rmd`: applies the main sample filters.
+- `06_outcome_casp19.Rmd`: creates the CASP-19 score and binary low quality-of-life outcome.
+- `07_EDA01_base_features.Rmd`: builds the first modelling dataset using selected base features.
+- `07_EDA02_additional_features.Rmd`: adds further candidate predictors from Wave 11.
+- `07_EDA03_feature_screening.Rmd`: screens features for missingness and sparse categories.
+- `08_model_development_training_only.Rmd`: develops and tunes the machine learning models on the training data.
+- `09_heldout_test_evaluation.Rmd`: evaluates the fixed models on the held-out test set.
+- `10_exploratory_lasso_weight_threshold.Rmd`: checks class weights and decision thresholds for the LASSO model.
+- `11_exploratory_ensemble_analysis.Rmd`: explores majority-voting ensembles across selected models.
 
-### pictures/
+## Folder overview
 
-Contains figures produced during the analysis, such as CASP-19 distributions, sample plots, feature-importance plots, and the ensemble correlation heatmap.
+- `data/wave11/`: local folder for raw ELSA Wave 11 files and data dictionaries. Only a README placeholder is uploaded.
+- `data/upload/`: manual input files used by the scripts, such as the preliminary feature-selection spreadsheet.
+- `data/processed/`: local folder for generated intermediate datasets, model objects, and prediction files. Only a README placeholder is uploaded.
+- `output/`: exported result tables.
+- `pictures/`: figures used in the analysis and README.
+- `script/`: R and R Markdown analysis scripts.
+- `script/html/`: optional rendered HTML files, if generated locally.
 
-### script/
+## Notes
 
-Contains the R and R Markdown scripts for the full workflow. The scripts are numbered so the order is easier to follow.
-
-### script/html/
-
-Contains rendered HTML versions of some R Markdown files. These are useful for reading the analysis output without re-running every script.
-
-
-## Files
-
-### 00_packages.R
-
-Loads the R packages used across the project and sets up the main folder paths. This file is sourced by later scripts.
-
-### 00_packages.Rmd
-
-A readable version of the package and path setup file.
-
-### 01_import_wave11.Rmd
-
-Imports the ELSA Wave 11 raw files and prepares the first saved version of the dataset used in the project.
-
-### 02_functions.R
-
-Contains helper functions used by later scripts, including functions for metadata handling, labels, feature checks, and exports.
-
-### 02_functions.Rmd
-
-A readable version of the helper functions file.
-
-### 03_build_wave11_metadata.Rmd
-
-Builds variable metadata and value-label information from the Wave 11 files. This makes it easier to search and understand variables before modelling.
-
-### 04_variable_matching.Rmd
-
-Records how candidate variables were identified and matched from the ELSA Wave 11 metadata.
-
-### 05_filter_analysis_sample.Rmd
-
-Creates the final analysis sample by applying the main inclusion criteria and cleaning key sample variables.
-
-### 06_outcome_casp19.Rmd
-
-Constructs the CASP-19 quality-of-life score and defines the binary low quality-of-life outcome used for modelling.
-
-### 07_EDA01_base_features.Rmd
-
-Builds the first version of the modelling dataset using the selected base features.
-
-### 07_EDA02_additional_features.Rmd
-
-Searches for and adds further candidate predictors from Wave 11, then combines them with the base feature set.
-
-### 07_EDA03_feature_screening.Rmd
-
-Screens candidate features for missingness and sparse categories, then saves the cleaned modelling dataset used in the machine learning scripts.
-
-### 08_model_development_training_only.Rmd
-
-Develops and compares the machine learning models using the training data only. This includes model tuning, feature importance checks, and selecting models for later evaluation.
-
-### 09_heldout_test_evaluation.Rmd
-
-Evaluates the fixed models on the held-out test set and saves the prediction results.
-
-### 10_exploratory_lasso_weight_threshold.Rmd
-
-Runs an exploratory check of class weights and decision thresholds for the LASSO logistic regression model.
-
-### 11_exploratory_ensemble_analysis.Rmd
-
-Explores whether majority-voting ensembles of the selected models improve the final prediction results.
-
-### html/
-
-Contains rendered HTML versions of some R Markdown scripts, if available.
+The full workflow requires authorised access to ELSA Wave 11. Files in `data/wave11/` and `data/processed/` are intentionally excluded from GitHub and should be regenerated or added locally by users with the appropriate data access.
