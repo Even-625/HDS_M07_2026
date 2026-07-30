@@ -2,7 +2,7 @@
 
 This repository contains the code and reproducibility materials for my HDS final project.
 
-**Title:** Identifying Low Quality of Life among Older Adults in England Using Machine Learning: An Analysis of ELSA Wave 11
+**Dissertation Title:** Identifying Low Quality of Life among Older Adults in England Using Machine Learning: An Analysis of ELSA Wave 11
 
 The GitHub version includes the analysis scripts, README, output tables, and figures. The raw ELSA Wave 11 data and processed datasets are not uploaded because they are subject to UK Data Service access and licence restrictions.
 
