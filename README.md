@@ -56,6 +56,8 @@ The screenshot below shows the full local file list used in `data/wave11/`.
 
 ## Script execution order
 
+Before running the workflow, the required R packages listed in `00_packages.R` should be installed. The script loads the packages and sets shared project paths, but it does not install packages automatically.
+
 Run the scripts from a clean R session in this order:
 
 ```text
