@@ -2089,8 +2089,77 @@ final_test_metrics</code></pre>
 ## 6 Important-featur… Trainin…            1       0.3 spec    binary         0.879
 ## 7 Important-featur… Trainin…            1       0.3 f_meas  binary         0.706</code></pre>
 </div>
-<div id="export-results" class="section level1" number="9">
-<h1><span class="header-section-number">9</span> 9. Export results</h1>
+<div id="compare-test-set-error-counts-at-default-and-selected-thresholds" class="section level1" number="9">
+<h1><span class="header-section-number">9</span> 9. Compare test-set
+error counts at default and selected thresholds</h1>
+<pre class="r"><code>make_test_confusion_counts &lt;- function(pred_df, threshold, strategy_label) {
+  class_df &lt;- pred_df %&gt;%
+    mutate(
+      .pred_class = factor(
+        if_else(
+          .pred_Low_QoL &gt;= threshold,
+          &quot;Low_QoL&quot;,
+          &quot;Non_low_QoL&quot;
+        ),
+        levels = c(&quot;Low_QoL&quot;, &quot;Non_low_QoL&quot;)
+      )
+    )
+  
+  tp &lt;- sum(
+    class_df$qol_status == &quot;Low_QoL&quot; &amp;
+      class_df$.pred_class == &quot;Low_QoL&quot;
+  )
+  
+  fn &lt;- sum(
+    class_df$qol_status == &quot;Low_QoL&quot; &amp;
+      class_df$.pred_class == &quot;Non_low_QoL&quot;
+  )
+  
+  fp &lt;- sum(
+    class_df$qol_status == &quot;Non_low_QoL&quot; &amp;
+      class_df$.pred_class == &quot;Low_QoL&quot;
+  )
+  
+  tn &lt;- sum(
+    class_df$qol_status == &quot;Non_low_QoL&quot; &amp;
+      class_df$.pred_class == &quot;Non_low_QoL&quot;
+  )
+  
+  tibble(
+    strategy = strategy_label,
+    threshold = round(threshold, 3),
+    TP = tp,
+    FN = fn,
+    FP = fp,
+    TN = tn,
+    low_qol_total = tp + fn,
+    non_low_qol_total = fp + tn
+  )
+}
+
+test_threshold_confusion_comparison &lt;- bind_rows(
+  make_test_confusion_counts(
+    pred_df = final_test_prob,
+    threshold = 0.50,
+    strategy_label = &quot;Default threshold&quot;
+  ),
+  make_test_confusion_counts(
+    pred_df = final_test_prob,
+    threshold = selected_threshold,
+    strategy_label = &quot;Training-CV selected threshold&quot;
+  )
+)
+
+test_threshold_confusion_comparison</code></pre>
+<pre><code>## # A tibble: 2 × 8
+##   strategy     threshold    TP    FN    FP    TN low_qol_total non_low_qol_total
+##   &lt;chr&gt;            &lt;dbl&gt; &lt;int&gt; &lt;int&gt; &lt;int&gt; &lt;int&gt;         &lt;int&gt;             &lt;int&gt;
+## 1 Default thr…       0.5   252   152    63  1128           404              1191
+## 2 Training-CV…       0.3   299   105   144  1047           404              1191</code></pre>
+</div>
+<div id="export-results" class="section level1" number="10">
+<h1><span class="header-section-number">10</span> 10. Export
+results</h1>
 <pre class="r"><code>sensitivity_export_file &lt;- file.path(
   output_path,
   &quot;10_exploratory_lasso_weight_threshold_results.xlsx&quot;
@@ -2100,6 +2169,7 @@ write_xlsx(
   list(
     selected_point_cv = selected_operating_point,
     final_test_metrics = final_test_metrics,
+    test_confusion_comparison = test_threshold_confusion_comparison,
     default_threshold_cv = default_threshold_results_across_weights,
     cv_threshold_grid = lasso_threshold_grid,
     lasso_tuning = lasso_tuning_results
@@ -2110,8 +2180,8 @@ write_xlsx(
 sensitivity_export_file</code></pre>
 <pre><code>## [1] &quot;/home/rstudio/work/rstudio/M07_Yiwen_upload/output/10_exploratory_lasso_weight_threshold_results.xlsx&quot;</code></pre>
 </div>
-<div id="interpretation-notes" class="section level1" number="10">
-<h1><span class="header-section-number">10</span> 10. Interpretation
+<div id="interpretation-notes" class="section level1" number="11">
+<h1><span class="header-section-number">11</span> 11. Interpretation
 notes</h1>
 <p>This analysis is considered exploratory because the class-weight and
 threshold analysis was added after reviewing the initial held-out

@@ -539,7 +539,71 @@ final_test_metrics <- evaluate_binary_predictions(
 final_test_metrics
 ```
 
-# 9. Export results
+# 9. Compare test-set error counts at default and selected thresholds
+
+```{r}
+make_test_confusion_counts <- function(pred_df, threshold, strategy_label) {
+  class_df <- pred_df %>%
+    mutate(
+      .pred_class = factor(
+        if_else(
+          .pred_Low_QoL >= threshold,
+          "Low_QoL",
+          "Non_low_QoL"
+        ),
+        levels = c("Low_QoL", "Non_low_QoL")
+      )
+    )
+  
+  tp <- sum(
+    class_df$qol_status == "Low_QoL" &
+      class_df$.pred_class == "Low_QoL"
+  )
+  
+  fn <- sum(
+    class_df$qol_status == "Low_QoL" &
+      class_df$.pred_class == "Non_low_QoL"
+  )
+  
+  fp <- sum(
+    class_df$qol_status == "Non_low_QoL" &
+      class_df$.pred_class == "Low_QoL"
+  )
+  
+  tn <- sum(
+    class_df$qol_status == "Non_low_QoL" &
+      class_df$.pred_class == "Non_low_QoL"
+  )
+  
+  tibble(
+    strategy = strategy_label,
+    threshold = round(threshold, 3),
+    TP = tp,
+    FN = fn,
+    FP = fp,
+    TN = tn,
+    low_qol_total = tp + fn,
+    non_low_qol_total = fp + tn
+  )
+}
+
+test_threshold_confusion_comparison <- bind_rows(
+  make_test_confusion_counts(
+    pred_df = final_test_prob,
+    threshold = 0.50,
+    strategy_label = "Default threshold"
+  ),
+  make_test_confusion_counts(
+    pred_df = final_test_prob,
+    threshold = selected_threshold,
+    strategy_label = "Training-CV selected threshold"
+  )
+)
+
+test_threshold_confusion_comparison
+```
+
+# 10. Export results
 
 ```{r}
 sensitivity_export_file <- file.path(
@@ -551,6 +615,7 @@ write_xlsx(
   list(
     selected_point_cv = selected_operating_point,
     final_test_metrics = final_test_metrics,
+    test_confusion_comparison = test_threshold_confusion_comparison,
     default_threshold_cv = default_threshold_results_across_weights,
     cv_threshold_grid = lasso_threshold_grid,
     lasso_tuning = lasso_tuning_results
@@ -561,6 +626,6 @@ write_xlsx(
 sensitivity_export_file
 ```
 
-# 10. Interpretation notes
+# 11. Interpretation notes
 
 This analysis is considered exploratory because the class-weight and threshold analysis was added after reviewing the initial held-out test-set model comparison in script 09. However, the model type was selected in script 08 using training-set cross-validation only, and the class weight, penalty, and classification threshold were also determined using training-set cross-validation only. The fixed operating point was subsequently applied to the same held-out test set used in script 09. Therefore, the resulting performance is interpreted as exploratory rather than independent confirmatory validation.
